@@ -50,7 +50,12 @@ def train(args):
 
     model = YoloResNet(num_classes=len(classes)).to(device)
     criterion = YoloLoss(S=S, C=len(classes)).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # Backbone học rất chậm để giữ đặc trưng (lr/10)
+    # Head học cực nhanh để bắt nhịp (lr*5)
+    optimizer = optim.Adam([
+        {'params': model.backbone.parameters(), 'lr': args.lr / 10.0},
+        {'params': model.head.parameters(), 'lr': args.lr * 5.0}
+    ], weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)

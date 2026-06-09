@@ -19,21 +19,38 @@ class YoloLoss(nn.Module):
         noobj_mask = targets[..., self.C] == 0.0
 
         # 1. REGRESSION LOSS (Thay MSE bằng CIoU Loss siêu việt)
+       # 1. REGRESSION LOSS (CIoU Loss)
         box_preds = predictions[..., self.C+1 : self.C+5][obj_mask]
         box_targets = targets[..., self.C+1 : self.C+5][obj_mask]
         
         if len(box_preds) > 0:
-            # Chuyển (x, y, w, h) sang (x1, y1, x2, y2)
-            preds_x1 = box_preds[:, 0] - box_preds[:, 2] / 2
-            preds_y1 = box_preds[:, 1] - box_preds[:, 3] / 2
-            preds_x2 = box_preds[:, 0] + box_preds[:, 2] / 2
-            preds_y2 = box_preds[:, 1] + box_preds[:, 3] / 2
+            # Lấy chỉ số batch, hàng (i), cột (j) từ obj_mask
+            indices = obj_mask.nonzero(as_tuple=False)
+            b, i, j = indices[:, 0], indices[:, 1], indices[:, 2]
+            
+            # --- XỬ LÝ PREDICTIONS ---
+            # Quy đổi x_cell, y_cell về tọa độ toàn ảnh [0, 1]
+            pred_global_x = (j.float() + box_preds[:, 0]) / self.S
+            pred_global_y = (i.float() + box_preds[:, 1]) / self.S
+            pred_w = box_preds[:, 2]
+            pred_h = box_preds[:, 3]
+            
+            preds_x1 = pred_global_x - pred_w / 2
+            preds_y1 = pred_global_y - pred_h / 2
+            preds_x2 = pred_global_x + pred_w / 2
+            preds_y2 = pred_global_y + pred_h / 2
             preds_boxes = torch.stack([preds_x1, preds_y1, preds_x2, preds_y2], dim=-1)
 
-            targs_x1 = box_targets[:, 0] - box_targets[:, 2] / 2
-            targs_y1 = box_targets[:, 1] - box_targets[:, 3] / 2
-            targs_x2 = box_targets[:, 0] + box_targets[:, 2] / 2
-            targs_y2 = box_targets[:, 1] + box_targets[:, 3] / 2
+            # --- XỬ LÝ TARGETS ---
+            targ_global_x = (j.float() + box_targets[:, 0]) / self.S
+            targ_global_y = (i.float() + box_targets[:, 1]) / self.S
+            targ_w = box_targets[:, 2]
+            targ_h = box_targets[:, 3]
+            
+            targs_x1 = targ_global_x - targ_w / 2
+            targs_y1 = targ_global_y - targ_h / 2
+            targs_x2 = targ_global_x + targ_w / 2
+            targs_y2 = targ_global_y + targ_h / 2
             targs_boxes = torch.stack([targs_x1, targs_y1, targs_x2, targs_y2], dim=-1)
 
             box_loss = ops.complete_box_iou_loss(preds_boxes, targs_boxes, reduction='sum')

@@ -161,10 +161,15 @@ def get_train_transform(image_size=448):
         A.HorizontalFlip(p=0.5), 
         A.ToGray(p=0.2), # Thêm ảnh xám (Mô phỏng camera hồng ngoại/thiếu sáng)
         A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5),
+        A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5, border_mode=cv2.BORDER_CONSTANT),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2(),
-    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
+    ], bbox_params=A.BboxParams(
+        format='pascal_voc',
+        label_fields=['class_labels'],
+        min_area=500,  # Loại bỏ box quá nhỏ sau khi biến đổi
+        min_visibility=0.2
+    ))
 
 def get_val_transform(image_size=448):
     return A.Compose([
