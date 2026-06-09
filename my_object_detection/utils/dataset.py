@@ -21,7 +21,7 @@ def parse_annotations(json_path):
     return data['classes'], data['images'], img_to_anns
 
 class ObjectDetectionDataset(Dataset):
-    def __init__(self, img_dir, images_info, img_to_anns, classes, transform=None, S=7):
+    def __init__(self, img_dir, images_info, img_to_anns, classes, transform=None, S=14):
         self.img_dir = img_dir
         self.images_info = images_info
         self.img_to_anns = img_to_anns
@@ -81,6 +81,9 @@ def get_train_transform():
     return A.Compose([
         A.Resize(height=448, width=448),
         A.HorizontalFlip(p=0.5), 
+        # PHA 1: THÊM AUGMENTATION MẠNH
+        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+        A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2(),
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))

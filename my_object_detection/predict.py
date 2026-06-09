@@ -35,8 +35,12 @@ def predict_image(model, image_path, device, threshold=0.15, iou_threshold=0.4):
         predictions = model(img_tensor)
 
     boxes = []
-    for i in range(7):
-        for j in range(7):
+    
+    # Lấy kích thước lưới hiện tại của mô hình (ví dụ 14)
+    S = predictions.shape[1] 
+    
+    for i in range(S):
+        for j in range(S):
             obj_score = predictions[0, i, j, 5].item()
             if obj_score < threshold:
                 continue
@@ -50,8 +54,8 @@ def predict_image(model, image_path, device, threshold=0.15, iou_threshold=0.4):
                 continue
 
             x, y, w, h = predictions[0, i, j, 6:10]
-            cx = (j + x.item()) * (448 / 7)
-            cy = (i + y.item()) * (448 / 7)
+            cx = (j + x.item()) * (448 / S)
+            cy = (i + y.item()) * (448 / S)
             bw = w.item() * 448
             bh = h.item() * 448
 
@@ -122,7 +126,7 @@ if __name__ == '__main__':
     # Danh sách lớp theo đề bài
     classes = ["person", "car", "dog", "cat", "chair"]
     
-    model = YoloResNet(num_classes=len(classes), S=7).to(device)
+    model = YoloResNet(num_classes=len(classes), S=14).to(device)
     
     # Load weights
     if os.path.exists(args.checkpoint):
