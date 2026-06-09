@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from utils.dataset import parse_annotations, ObjectDetectionDataset, get_train_transform
+from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicDataset, get_train_transform
 from utils.loss import YoloLoss
 from model_arch import YoloResNet
 
@@ -16,9 +16,10 @@ def parse_args():
     parser.add_argument("--image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh train")
     parser.add_argument("--val_image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh validation")
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Thư mục lưu mô hình tốt nhất")
-    parser.add_argument("--epochs", type=int, default=50, help="Số lượng epoch")
-    parser.add_argument("--batch_size", type=int, default=16, help="Kích thước batch")
+    parser.add_argument("--epochs", type=int, default=60, help="Số lượng epoch")
+    parser.add_argument("--batch_size", type=int, default=8, help="Kích thước batch (Mặc định 8 cho ResNet101)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--image_size", type=int, default=640, help="Kích thước ảnh linh hoạt (vd: 448, 512, 640)")
     return parser.parse_args()
 
 def train(args):
@@ -32,23 +33,28 @@ def train(args):
     # Load dữ liệu train
     classes, images_info, train_anns = parse_annotations(args.train_data)
 
-    train_dataset = ObjectDetectionDataset(
+    base_train_dataset = ObjectDetectionDataset(
         img_dir=args.image_dir,
         images_info=images_info,
         img_to_anns=train_anns,
         classes=classes,
-        transform=get_train_transform(),
-        S=14 # PHA 3
+        transform=get_train_transform(image_size=args.image_size),
+        image_size=args.image_size
     )
+    
+    # Bọc bằng MosaicDataset để ghép 4 ảnh
+    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.5)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
 
-    # Khởi tạo mô hình và loss với lưới S=14
-    model = YoloResNet(num_classes=len(classes), S=14).to(device)
-    criterion = YoloLoss(S=14, C=len(classes)).to(device)
+    S = args.image_size // 32
+    print(f"Khởi tạo mô hình ResNet101 với kích thước ảnh {args.image_size}x{args.image_size} (Lưới {S}x{S})")
+
+    # Khởi tạo mô hình và loss với lưới động S
+    model = YoloResNet(num_classes=len(classes)).to(device)
+    criterion = YoloLoss(S=S, C=len(classes)).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     
-    # PHA 1: Thêm Learning Rate Scheduler giúp mô hình hội tụ tốt hơn ở các epoch cuối
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -77,12 +83,10 @@ def train(args):
             
         avg_loss = epoch_loss / len(train_loader)
         
-        # Cập nhật Scheduler
         scheduler.step()
         
         print(f"-> Trung bình Loss Epoch {epoch+1}: {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
         
-        # Lưu checkpoint khi có kết quả tốt hơn
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model.state_dict(), best_model_path)
