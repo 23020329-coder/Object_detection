@@ -17,9 +17,10 @@ def parse_args():
     parser.add_argument("--val_image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh validation")
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Thư mục lưu mô hình tốt nhất")
     parser.add_argument("--epochs", type=int, default=60, help="Số lượng epoch")
-    parser.add_argument("--batch_size", type=int, default=8, help="Kích thước batch (Mặc định 8 cho ResNet101)")
+    parser.add_argument("--batch_size", type=int, default=8, help="Kích thước batch")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--image_size", type=int, default=640, help="Kích thước ảnh linh hoạt (vd: 448, 512, 640)")
+    parser.add_argument("--image_size", type=int, default=640, help="Kích thước ảnh linh hoạt")
+    parser.add_argument("--resume", action="store_true", help="Tự động nạp lại checkpoint nếu có")
     return parser.parse_args()
 
 def train(args):
@@ -30,7 +31,6 @@ def train(args):
         print(f"Lỗi: Không tìm thấy {args.train_data} hoặc {args.image_dir}.")
         return
 
-    # Load dữ liệu train
     classes, images_info, train_anns = parse_annotations(args.train_data)
 
     base_train_dataset = ObjectDetectionDataset(
@@ -42,23 +42,23 @@ def train(args):
         image_size=args.image_size
     )
     
-    # Bọc bằng MosaicDataset để ghép 4 ảnh
     train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.5)
-
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
 
     S = args.image_size // 32
-    print(f"Khởi tạo mô hình ResNet101 với kích thước ảnh {args.image_size}x{args.image_size} (Lưới {S}x{S})")
+    print(f"Khởi tạo mô hình ResNet50 với kích thước ảnh {args.image_size}x{args.image_size} (Lưới {S}x{S})")
 
-    # Khởi tạo mô hình và loss với lưới động S
     model = YoloResNet(num_classes=len(classes)).to(device)
     criterion = YoloLoss(S=S, C=len(classes)).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     best_model_path = os.path.join(args.checkpoint_dir, 'best.pth')
+    
+    if args.resume and os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path, map_location=device))
+        print(f"[*] Đã khôi phục thành công trọng số từ {best_model_path}. Tiếp tục huấn luyện!")
 
     best_loss = float('inf')
 
@@ -82,7 +82,6 @@ def train(args):
             loop.set_postfix(loss=loss.item())
             
         avg_loss = epoch_loss / len(train_loader)
-        
         scheduler.step()
         
         print(f"-> Trung bình Loss Epoch {epoch+1}: {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
