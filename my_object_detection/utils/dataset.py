@@ -199,7 +199,7 @@ def get_train_transform(image_size=640):
         A.HorizontalFlip(p=0.5),
         A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
         A.Affine(
-            shift=(-0.0625, 0.0625),
+            translate_percent=(-0.0625, 0.0625),
             scale=(0.9, 1.1),
             rotate=(-15, 15),
             p=0.5,

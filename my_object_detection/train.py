@@ -22,6 +22,7 @@ class EMA:
     """Giữ bản sao 'mượt' của trọng số model. Dùng để evaluate & save checkpoint."""
     def __init__(self, model, decay=0.9999):
         self.decay = decay
+        self.updates = 0
         self.shadow = {}
         self.backup = {}
         for name, param in model.named_parameters():
@@ -29,9 +30,12 @@ class EMA:
                 self.shadow[name] = param.data.clone()
 
     def update(self, model):
+        self.updates += 1
+        # Dynamic decay cho những epoch đầu (giống YOLOv5/v8)
+        d = self.decay * (1 - math.exp(-self.updates / 2000))
         for name, param in model.named_parameters():
             if param.requires_grad:
-                self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
+                self.shadow[name] = d * self.shadow[name] + (1 - d) * param.data
 
     def apply_shadow(self, model):
         for name, param in model.named_parameters():
@@ -59,6 +63,7 @@ def parse_args():
     parser.add_argument("--image_size", type=int, default=640, help="Kích thước ảnh")
     parser.add_argument("--resume", action="store_true", help="Tự động nạp lại checkpoint nếu có")
     parser.add_argument("--warmup_epochs", type=int, default=3, help="Số epoch warmup")
+    parser.add_argument("--eval_interval", type=int, default=5, help="Số epoch giữa mỗi lần đánh giá mAP")
     return parser.parse_args()
 
 
@@ -180,23 +185,26 @@ def train(args):
         # === Evaluation với EMA weights ===
         ema.apply_shadow(model)
 
-        print("Đang đánh giá mAP trên tập Validation...")
-        val_result, _ = evaluate_model_map(
-            model=model,
-            gt_json_path=args.val_data,
-            image_dir=args.val_image_dir,
-            image_size=args.image_size,
-            threshold=0.15,
-            iou_threshold=0.5
-        )
-        epoch_map = val_result["mAP@0.5"]
-        print(f"-> mAP@0.5 Epoch {epoch + 1}: {epoch_map:.4f}")
+        if (epoch + 1) % args.eval_interval == 0 or epoch == total_epochs - 1:
+            print(f"Đang đánh giá mAP trên tập Validation (có thể mất vài phút)...")
+            val_result, _ = evaluate_model_map(
+                model=model,
+                gt_json_path=args.val_data,
+                image_dir=args.val_image_dir,
+                image_size=args.image_size,
+                threshold=0.15,
+                iou_threshold=0.5
+            )
+            epoch_map = val_result["mAP@0.5"]
+            print(f"-> mAP@0.5 Epoch {epoch + 1}: {epoch_map:.4f}")
 
-        # Save best mAP
-        if epoch_map > best_map:
-            best_map = epoch_map
-            torch.save(model.state_dict(), best_model_path)
-            print(f"   [!] Đã lưu checkpoint tốt nhất (mAP: {best_map:.4f}) → {best_model_path}")
+            # Save best mAP
+            if epoch_map > best_map:
+                best_map = epoch_map
+                torch.save(model.state_dict(), best_model_path)
+                print(f"   [!] Đã lưu checkpoint tốt nhất (mAP: {best_map:.4f}) → {best_model_path}")
+        else:
+            print(f"-> Bỏ qua đánh giá mAP ở epoch này (đánh giá mỗi {args.eval_interval} epoch để tiết kiệm thời gian).")
 
         # Save best loss
         best_loss_path = os.path.join(args.checkpoint_dir, 'best_loss.pth')
