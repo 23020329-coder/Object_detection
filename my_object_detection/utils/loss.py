@@ -1,93 +1,139 @@
+"""
+YOLOv3-style Multi-Scale Loss Function.
+- Objectness: BCEWithLogitsLoss (ổn định hơn BCELoss, AMP-safe)
+- Classification: Sigmoid Focal Loss (nhất quán với sigmoid inference)
+- Regression: CIoU Loss
+"""
 import torch
 import torch.nn as nn
 import torchvision.ops as ops
+from utils.anchors import STRIDES, get_anchor_tensors
+
 
 class YoloLoss(nn.Module):
-    def __init__(self, S=14, C=5):
+    def __init__(self, C=5, image_size=640):
         super().__init__()
-        self.S = S
         self.C = C
-        
-        # Objectness: BCELoss (vì logit đã qua sigmoid ở model)
-        self.bce = nn.BCELoss(reduction='sum')
-        
-        # Classification: CrossEntropyLoss (softmax bên trong)
-        # → Nhất quán với softmax dùng trong inference/metrics.py
-        self.ce = nn.CrossEntropyLoss(reduction='sum')
-        
-        self.lambda_noobj = 0.5
+        self.image_size = image_size
+        self.strides = STRIDES
+        self.anchors = get_anchor_tensors()  # list of 3 tensors [3, 2]
+
+        # BCEWithLogitsLoss: nhận raw logit, tự áp dụng sigmoid bên trong
+        # → Không cần sigmoid trong model → AMP-safe tự nhiên
+        self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
+
+        # Hệ số cân bằng các thành phần loss
         self.lambda_coord = 5.0
+        self.lambda_obj = 1.0
+        self.lambda_noobj = 0.5
+        self.lambda_cls = 1.0
+
+        # Focal Loss parameters
+        self.focal_alpha = 0.25
+        self.focal_gamma = 2.0
 
     def forward(self, predictions, targets):
-        obj_mask = targets[..., self.C] == 1.0     
-        noobj_mask = targets[..., self.C] == 0.0
+        """
+        predictions: tuple (out_s, out_m, out_l), each [B, S, S, A, 5+C] raw logits
+        targets: tuple (tgt_s, tgt_m, tgt_l), each [B, S, S, A, 5+C]
 
-        # 1. REGRESSION LOSS (CIoU Loss)
-        box_preds = predictions[..., self.C+1 : self.C+5][obj_mask]
-        box_targets = targets[..., self.C+1 : self.C+5][obj_mask]
-        
-        if len(box_preds) > 0:
-            # Lấy chỉ số batch, hàng (i), cột (j) từ obj_mask
-            indices = obj_mask.nonzero(as_tuple=False)
-            b, i, j = indices[:, 0], indices[:, 1], indices[:, 2]
-            
-            # --- XỬ LÝ PREDICTIONS ---
-            # Quy đổi x_cell, y_cell về tọa độ toàn ảnh [0, 1]
-            pred_global_x = (j.float() + box_preds[:, 0]) / self.S
-            pred_global_y = (i.float() + box_preds[:, 1]) / self.S
-            pred_w = box_preds[:, 2]
-            pred_h = box_preds[:, 3]
-            
-            preds_x1 = pred_global_x - pred_w / 2
-            preds_y1 = pred_global_y - pred_h / 2
-            preds_x2 = pred_global_x + pred_w / 2
-            preds_y2 = pred_global_y + pred_h / 2
-            preds_boxes = torch.stack([preds_x1, preds_y1, preds_x2, preds_y2], dim=-1)
+        Target format per anchor:
+            [0] tx, [1] ty, [2] tw, [3] th, [4] objectness, [5:5+C] one-hot class
+        """
+        total_box_loss = 0.0
+        total_obj_loss = 0.0
+        total_cls_loss = 0.0
+        device = predictions[0].device
 
-            # --- XỬ LÝ TARGETS ---
-            targ_global_x = (j.float() + box_targets[:, 0]) / self.S
-            targ_global_y = (i.float() + box_targets[:, 1]) / self.S
-            targ_w = box_targets[:, 2]
-            targ_h = box_targets[:, 3]
-            
-            targs_x1 = targ_global_x - targ_w / 2
-            targs_y1 = targ_global_y - targ_h / 2
-            targs_x2 = targ_global_x + targ_w / 2
-            targs_y2 = targ_global_y + targ_h / 2
-            targs_boxes = torch.stack([targs_x1, targs_y1, targs_x2, targs_y2], dim=-1)
+        for scale_idx, (pred, tgt) in enumerate(zip(predictions, targets)):
+            anchors = self.anchors[scale_idx].to(device)  # [3, 2]
+            stride = self.strides[scale_idx]
 
-            box_loss = ops.complete_box_iou_loss(preds_boxes, targs_boxes, reduction='sum')
-        else:
-            box_loss = torch.tensor(0.0).to(predictions.device)
-        
-        # 2. OBJECTNESS LOSS (Thay MSE bằng BCE)
-        obj_preds = predictions[..., self.C][obj_mask]
-        obj_targets = targets[..., self.C][obj_mask]
-        object_loss = self.bce(obj_preds, obj_targets) if len(obj_preds) > 0 else torch.tensor(0.0).to(predictions.device)
-        
-        noobj_preds = predictions[..., self.C][noobj_mask]
-        noobj_targets = targets[..., self.C][noobj_mask]
-        no_object_loss = self.bce(noobj_preds, noobj_targets) if len(noobj_preds) > 0 else torch.tensor(0.0).to(predictions.device)
-        
-        # 3. CLASSIFICATION LOSS (CrossEntropyLoss)
-        class_preds = predictions[..., :self.C][obj_mask]   # [N, C] raw logits
-        class_targets = targets[..., :self.C][obj_mask]     # [N, C] one-hot
-        
-        if len(class_preds) > 0:
-            # Chuyển one-hot thành class index [N] để dùng CrossEntropyLoss
-            class_indices = class_targets.argmax(dim=-1).long()  # [N]
-            # CrossEntropyLoss áp dụng log-softmax bên trong → nhất quán với inference
-            class_loss = self.ce(class_preds, class_indices)
-        else:
-            class_loss = torch.tensor(0.0).to(predictions.device)
+            obj_mask = tgt[..., 4] == 1.0      # [B, S, S, A] — ô có vật thể
+            noobj_mask = tgt[..., 4] == 0.0    # [B, S, S, A] — ô trống
 
-        # Tổng hợp Loss (Composite Loss)
+            # === 1. Objectness Loss (BCEWithLogitsLoss) ===
+            obj_loss_map = self.bce_obj(pred[..., 4], tgt[..., 4])
+            obj_loss = (
+                self.lambda_obj * obj_loss_map[obj_mask].sum() +
+                self.lambda_noobj * obj_loss_map[noobj_mask].sum()
+            )
+            total_obj_loss += obj_loss
+
+            num_pos = obj_mask.sum().item()
+            if num_pos == 0:
+                continue
+
+            # === 2. Box Regression Loss (CIoU) ===
+            pred_boxes = self._decode_boxes(pred, anchors, stride, obj_mask)
+            tgt_boxes = self._decode_target_boxes(tgt, anchors, stride, obj_mask)
+            box_loss = ops.complete_box_iou_loss(pred_boxes, tgt_boxes, reduction='sum')
+            total_box_loss += box_loss
+
+            # === 3. Classification Loss (Sigmoid Focal Loss) ===
+            cls_pred = pred[..., 5:5 + self.C][obj_mask]   # [N, C] raw logits
+            cls_tgt = tgt[..., 5:5 + self.C][obj_mask]     # [N, C] one-hot
+            cls_loss = ops.sigmoid_focal_loss(
+                cls_pred, cls_tgt,
+                alpha=self.focal_alpha, gamma=self.focal_gamma,
+                reduction='sum'
+            )
+            total_cls_loss += cls_loss
+
+        batch_size = predictions[0].shape[0]
         total_loss = (
-            self.lambda_coord * box_loss   
-            + object_loss                  
-            + self.lambda_noobj * no_object_loss 
-            + class_loss                   
+            self.lambda_coord * total_box_loss
+            + total_obj_loss
+            + self.lambda_cls * total_cls_loss
         )
-
-        batch_size = predictions.shape[0]
         return total_loss / batch_size
+
+    def _decode_boxes(self, pred, anchors, stride, mask):
+        """Decode predicted boxes → [x1, y1, x2, y2] normalized [0, 1]."""
+        indices = mask.nonzero(as_tuple=False)  # [N, 4]: (batch, i, j, anchor)
+        b, gi, gj, a = indices[:, 0], indices[:, 1], indices[:, 2], indices[:, 3]
+
+        tx = pred[b, gi, gj, a, 0]
+        ty = pred[b, gi, gj, a, 1]
+        tw = pred[b, gi, gj, a, 2]
+        th = pred[b, gi, gj, a, 3]
+
+        aw = anchors[a, 0]
+        ah = anchors[a, 1]
+
+        cx = (torch.sigmoid(tx) + gj.float()) * stride / self.image_size
+        cy = (torch.sigmoid(ty) + gi.float()) * stride / self.image_size
+        w = aw * torch.exp(tw.clamp(max=5.0)) / self.image_size
+        h = ah * torch.exp(th.clamp(max=5.0)) / self.image_size
+
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+
+        return torch.stack([x1, y1, x2, y2], dim=-1)
+
+    def _decode_target_boxes(self, tgt, anchors, stride, mask):
+        """Decode target boxes → [x1, y1, x2, y2] normalized [0, 1]."""
+        indices = mask.nonzero(as_tuple=False)
+        b, gi, gj, a = indices[:, 0], indices[:, 1], indices[:, 2], indices[:, 3]
+
+        tx = tgt[b, gi, gj, a, 0]
+        ty = tgt[b, gi, gj, a, 1]
+        tw = tgt[b, gi, gj, a, 2]
+        th = tgt[b, gi, gj, a, 3]
+
+        aw = anchors[a, 0]
+        ah = anchors[a, 1]
+
+        cx = (tx + gj.float()) * stride / self.image_size
+        cy = (ty + gi.float()) * stride / self.image_size
+        w = aw * torch.exp(tw) / self.image_size
+        h = ah * torch.exp(th) / self.image_size
+
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+
+        return torch.stack([x1, y1, x2, y2], dim=-1)

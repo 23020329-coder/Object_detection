@@ -1,9 +1,19 @@
+"""
+Metrics & Evaluation cho YOLOv3-style Multi-Scale Detector.
+Decode predictions từ 3 scales, áp dụng NMS, tính mAP@0.5.
+"""
 import json
+import math
 import os
 from collections import defaultdict
+
 import cv2
+import numpy as np
 import torch
 import torchvision.ops as ops
+
+from utils.anchors import get_anchors, STRIDES
+
 
 def bbox_iou(box_a, box_b):
     ax1, ay1, ax2, ay2 = box_a
@@ -25,6 +35,7 @@ def bbox_iou(box_a, box_b):
         return 0.0
     return intersection / union
 
+
 def compute_ap(recalls, precisions):
     if not recalls:
         return 0.0
@@ -40,6 +51,7 @@ def compute_ap(recalls, precisions):
         if mrec[index] != mrec[index - 1]:
             ap += (mrec[index] - mrec[index - 1]) * mpre[index]
     return ap
+
 
 def evaluate_map50(ground_truth, predictions, classes, iou_threshold=0.5):
     gt_by_class = {class_name: defaultdict(list) for class_name in classes}
@@ -138,14 +150,79 @@ def evaluate_map50(ground_truth, predictions, classes, iou_threshold=0.5):
     }
 
 
-def predict_image_for_eval(model, image_path, threshold=0.15, iou_threshold=0.4):
+def decode_multi_scale(model_outputs, image_size, C, conf_threshold=0.15):
+    """
+    Decode raw model outputs từ 3 scales thành danh sách boxes.
+    Sử dụng SIGMOID cho cả objectness và classification (nhất quán với training).
+
+    model_outputs: tuple (out_s, out_m, out_l), each [1, S, S, A, 5+C]
+    Returns: list of (x1, y1, x2, y2, score, class_idx) in pixel coords of image_size
+    """
+    anchors = get_anchors()
+    strides = STRIDES
+    all_boxes = []
+
+    for pred, scale_anchors, stride in zip(model_outputs, anchors, strides):
+        pred = pred[0]  # remove batch dim: [S, S, A, 5+C]
+        S = pred.shape[0]
+
+        # Vectorized objectness filter
+        obj_scores = torch.sigmoid(pred[..., 4])  # [S, S, A]
+        mask = obj_scores > conf_threshold
+
+        if not mask.any():
+            continue
+
+        indices = mask.nonzero(as_tuple=False)  # [N, 3]: (i, j, a)
+        i_idx, j_idx, a_idx = indices[:, 0], indices[:, 1], indices[:, 2]
+
+        # Anchors cho selected detections
+        anchor_wh = torch.tensor(scale_anchors, device=pred.device, dtype=torch.float32)
+        aw = anchor_wh[a_idx, 0]
+        ah = anchor_wh[a_idx, 1]
+
+        # Decode boxes
+        tx = pred[i_idx, j_idx, a_idx, 0]
+        ty = pred[i_idx, j_idx, a_idx, 1]
+        tw = pred[i_idx, j_idx, a_idx, 2]
+        th = pred[i_idx, j_idx, a_idx, 3]
+
+        cx = (torch.sigmoid(tx) + j_idx.float()) * stride
+        cy = (torch.sigmoid(ty) + i_idx.float()) * stride
+        bw = aw * torch.exp(tw.clamp(max=5.0))
+        bh = ah * torch.exp(th.clamp(max=5.0))
+
+        x1 = (cx - bw / 2).clamp(min=0)
+        y1 = (cy - bh / 2).clamp(min=0)
+        x2 = (cx + bw / 2).clamp(max=image_size)
+        y2 = (cy + bh / 2).clamp(max=image_size)
+
+        # Class scores — SIGMOID (nhất quán với focal loss training)
+        obj = obj_scores[i_idx, j_idx, a_idx]
+        cls_logits = pred[i_idx, j_idx, a_idx, 5:5 + C]
+        cls_scores = torch.sigmoid(cls_logits)
+        class_score, class_idx = cls_scores.max(dim=1)
+
+        final_score = obj * class_score
+
+        # Score filter
+        keep = final_score > conf_threshold
+        if keep.any():
+            for k in keep.nonzero(as_tuple=False).squeeze(1):
+                all_boxes.append((
+                    x1[k].item(), y1[k].item(),
+                    x2[k].item(), y2[k].item(),
+                    final_score[k].item(), class_idx[k].item()
+                ))
+
+    return all_boxes
+
+
+def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, iou_threshold=0.4):
+    """Predict trên 1 ảnh, decode multi-scale, áp dụng NMS."""
     device = next(model.parameters()).device
     model.eval()
-
-    # Tự động lấy cấu hình từ mô hình ResNet
-    C = getattr(model, 'C', 5)
-    S = getattr(model, 'S', 7)
-    image_size = S * 32
+    C = model.C
 
     original_img = cv2.imread(image_path)
     if original_img is None:
@@ -155,59 +232,43 @@ def predict_image_for_eval(model, image_path, threshold=0.15, iou_threshold=0.4)
     orig_h, orig_w = original_img.shape[:2]
     img_resized = cv2.resize(original_img, (image_size, image_size))
 
-    img_tensor = (img_resized / 255.0 - torch.tensor([0.485, 0.456, 0.406]).numpy()) / torch.tensor([0.229, 0.224, 0.225]).numpy()
+    # Normalize giống training
+    img_tensor = (img_resized / 255.0 - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
     img_tensor = torch.tensor(img_tensor).permute(2, 0, 1).unsqueeze(0).float().to(device)
 
     with torch.no_grad():
-        predictions = model(img_tensor)
+        outputs = model(img_tensor)  # (out_s, out_m, out_l)
 
-    boxes = []
-    max_obj = 0.0
-    for i in range(S):
-        for j in range(S):
-            obj_score = predictions[0, i, j, C].item()
-            max_obj = max(max_obj, obj_score)
-
-            if obj_score < threshold:
-                continue
-
-            class_probs = torch.softmax(predictions[0, i, j, :C], dim=0)
-            class_idx = torch.argmax(class_probs).item()
-            class_score = class_probs[class_idx].item()
-            final_score = obj_score * class_score
-
-            if final_score < threshold:
-                continue
-
-            x, y, w, h = predictions[0, i, j, C+1:C+5]
-            cx = (j + x.item()) * (image_size / S)
-            cy = (i + y.item()) * (image_size / S)
-            bw = w.item() * image_size
-            bh = h.item() * image_size
-
-            x1 = max(0.0, cx - bw / 2)
-            y1 = max(0.0, cy - bh / 2)
-            x2 = min(float(image_size), cx + bw / 2)
-            y2 = min(float(image_size), cy + bh / 2)
-
-            x1 = x1 * orig_w / float(image_size)
-            y1 = y1 * orig_h / float(image_size)
-            x2 = x2 * orig_w / float(image_size)
-            y2 = y2 * orig_h / float(image_size)
-
-            boxes.append((x1, y1, x2, y2, final_score, class_idx))
+    # Decode từ 3 scales
+    boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
 
     if len(boxes) == 0:
-        return original_img, [], max_obj
+        return original_img, []
 
+    # NMS
     box_tensor = torch.tensor([[b[0], b[1], b[2], b[3]] for b in boxes], dtype=torch.float32)
     score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32)
-    keep_idx = ops.nms(box_tensor, score_tensor, iou_threshold)
+    class_tensor = torch.tensor([b[5] for b in boxes], dtype=torch.int64)
+
+    keep_idx = ops.batched_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
     final_boxes = [boxes[i] for i in keep_idx.tolist()]
 
-    return original_img, final_boxes, max_obj
+    # Scale boxes về tọa độ ảnh gốc
+    scaled_boxes = []
+    for x1, y1, x2, y2, score, cls_idx in final_boxes:
+        scaled_boxes.append((
+            x1 * orig_w / image_size,
+            y1 * orig_h / image_size,
+            x2 * orig_w / image_size,
+            y2 * orig_h / image_size,
+            score, cls_idx
+        ))
 
-def build_predictions_for_split(model, gt_json_path, image_dir, threshold=0.15, iou_threshold=0.4, max_detections_per_image=100):
+    return original_img, scaled_boxes
+
+
+def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
+                                threshold=0.15, iou_threshold=0.4, max_detections_per_image=100):
     with open(gt_json_path, "r", encoding="utf-8") as file:
         ground_truth = json.load(file)
 
@@ -216,9 +277,10 @@ def build_predictions_for_split(model, gt_json_path, image_dir, threshold=0.15, 
 
     for image_info in ground_truth["images"]:
         image_path = os.path.join(image_dir, os.path.basename(image_info["file_name"]))
-        _, boxes, max_obj = predict_image_for_eval(
+        _, boxes = predict_image_for_eval(
             model,
             image_path,
+            image_size=image_size,
             threshold=threshold,
             iou_threshold=iou_threshold,
         )
@@ -239,11 +301,15 @@ def build_predictions_for_split(model, gt_json_path, image_dir, threshold=0.15, 
 
     return ground_truth, predictions
 
-def evaluate_model_map(model, gt_json_path, image_dir, threshold=0.15, iou_threshold=0.5, max_detections_per_image=100, output_path=None):
+
+def evaluate_model_map(model, gt_json_path, image_dir, image_size=640,
+                       threshold=0.15, iou_threshold=0.5,
+                       max_detections_per_image=100, output_path=None):
     ground_truth, predictions = build_predictions_for_split(
         model=model,
         gt_json_path=gt_json_path,
         image_dir=image_dir,
+        image_size=image_size,
         threshold=threshold,
         iou_threshold=iou_threshold,
         max_detections_per_image=max_detections_per_image,
