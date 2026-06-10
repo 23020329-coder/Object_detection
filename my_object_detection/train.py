@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicDataset, get_train_transform
 from utils.loss import YoloLoss
+from utils.metrics import evaluate_model_map
 from model_arch import YoloResNet
 
 def parse_args():
@@ -26,6 +27,9 @@ def parse_args():
 def train(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Sử dụng thiết bị: {device}")
+    
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
 
     if not os.path.exists(args.train_data) or not os.path.exists(args.image_dir):
         print(f"Lỗi: Không tìm thấy {args.train_data} hoặc {args.image_dir}.")
@@ -43,12 +47,19 @@ def train(args):
     )
     
     train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.5)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        num_workers=4, 
+        pin_memory=True, 
+        prefetch_factor=2
+    )
 
     S = args.image_size // 32
     print(f"Khởi tạo mô hình ResNet50 với kích thước ảnh {args.image_size}x{args.image_size} (Lưới {S}x{S})")
 
-    model = YoloResNet(num_classes=len(classes)).to(device)
+    model = YoloResNet(num_classes=len(classes), S=S).to(device)
     criterion = YoloLoss(S=S, C=len(classes)).to(device)
     # Backbone học rất chậm để giữ đặc trưng (lr/10)
     # Head học cực nhanh để bắt nhịp (lr*5)
@@ -66,8 +77,11 @@ def train(args):
         print(f"[*] Đã khôi phục thành công trọng số từ {best_model_path}. Tiếp tục huấn luyện!")
 
     best_loss = float('inf')
+    best_map = 0.0
 
     print("Bắt đầu huấn luyện...")
+    scaler = torch.cuda.amp.GradScaler()
+    
     for epoch in range(args.epochs):
         model.train()
         epoch_loss = 0
@@ -78,10 +92,13 @@ def train(args):
             targets = targets.to(device)
 
             optimizer.zero_grad()
-            predictions = model(images)
-            loss = criterion(predictions, targets)
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast():
+                predictions = model(images)
+                loss = criterion(predictions, targets)
+                
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             epoch_loss += loss.item()
             loop.set_postfix(loss=loss.item())
@@ -91,10 +108,28 @@ def train(args):
         
         print(f"-> Trung bình Loss Epoch {epoch+1}: {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
         
+        # Đánh giá mAP trên tập Validation
+        print("Đang đánh giá mAP trên tập Validation...")
+        val_result, _ = evaluate_model_map(
+            model=model,
+            gt_json_path=args.val_data,
+            image_dir=args.val_image_dir,
+            threshold=0.15,
+            iou_threshold=0.5
+        )
+        epoch_map = val_result["mAP@0.5"]
+        print(f"-> mAP@0.5 Epoch {epoch+1}: {epoch_map:.4f}")
+        
+        if epoch_map > best_map:
+            best_map = epoch_map
+            torch.save(model.state_dict(), best_model_path)
+            print(f"   [!] Đã lưu checkpoint mới tốt nhất (mAP: {best_map:.4f}) vào {best_model_path}")
+            
+        best_loss_path = os.path.join(args.checkpoint_dir, 'best_loss.pth')
         if avg_loss < best_loss:
             best_loss = avg_loss
-            torch.save(model.state_dict(), best_model_path)
-            print(f"   [!] Đã lưu checkpoint mới tốt nhất vào {best_model_path}")
+            torch.save(model.state_dict(), best_loss_path)
+            print(f"   [!] Đã lưu checkpoint (Loss tốt nhất: {best_loss:.4f}) vào {best_loss_path}")
 
 if __name__ == '__main__':
     args = parse_args()

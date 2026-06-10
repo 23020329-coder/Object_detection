@@ -142,13 +142,18 @@ def predict_image_for_eval(model, image_path, threshold=0.15, iou_threshold=0.4)
     device = next(model.parameters()).device
     model.eval()
 
+    # Tự động lấy cấu hình từ mô hình ResNet
+    C = getattr(model, 'C', 5)
+    S = getattr(model, 'S', 7)
+    image_size = S * 32
+
     original_img = cv2.imread(image_path)
     if original_img is None:
         raise FileNotFoundError(f"Không đọc được ảnh: {image_path}")
 
     original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
     orig_h, orig_w = original_img.shape[:2]
-    img_resized = cv2.resize(original_img, (448, 448))
+    img_resized = cv2.resize(original_img, (image_size, image_size))
 
     img_tensor = (img_resized / 255.0 - torch.tensor([0.485, 0.456, 0.406]).numpy()) / torch.tensor([0.229, 0.224, 0.225]).numpy()
     img_tensor = torch.tensor(img_tensor).permute(2, 0, 1).unsqueeze(0).float().to(device)
@@ -158,15 +163,15 @@ def predict_image_for_eval(model, image_path, threshold=0.15, iou_threshold=0.4)
 
     boxes = []
     max_obj = 0.0
-    for i in range(7):
-        for j in range(7):
-            obj_score = predictions[0, i, j, 5].item()
+    for i in range(S):
+        for j in range(S):
+            obj_score = predictions[0, i, j, C].item()
             max_obj = max(max_obj, obj_score)
 
             if obj_score < threshold:
                 continue
 
-            class_probs = torch.softmax(predictions[0, i, j, :5], dim=0)
+            class_probs = torch.softmax(predictions[0, i, j, :C], dim=0)
             class_idx = torch.argmax(class_probs).item()
             class_score = class_probs[class_idx].item()
             final_score = obj_score * class_score
@@ -174,21 +179,21 @@ def predict_image_for_eval(model, image_path, threshold=0.15, iou_threshold=0.4)
             if final_score < threshold:
                 continue
 
-            x, y, w, h = predictions[0, i, j, 6:10]
-            cx = (j + x.item()) * (448 / 7)
-            cy = (i + y.item()) * (448 / 7)
-            bw = w.item() * 448
-            bh = h.item() * 448
+            x, y, w, h = predictions[0, i, j, C+1:C+5]
+            cx = (j + x.item()) * (image_size / S)
+            cy = (i + y.item()) * (image_size / S)
+            bw = w.item() * image_size
+            bh = h.item() * image_size
 
             x1 = max(0.0, cx - bw / 2)
             y1 = max(0.0, cy - bh / 2)
-            x2 = min(448.0, cx + bw / 2)
-            y2 = min(448.0, cy + bh / 2)
+            x2 = min(float(image_size), cx + bw / 2)
+            y2 = min(float(image_size), cy + bh / 2)
 
-            x1 = x1 * orig_w / 448.0
-            y1 = y1 * orig_h / 448.0
-            x2 = x2 * orig_w / 448.0
-            y2 = y2 * orig_h / 448.0
+            x1 = x1 * orig_w / float(image_size)
+            y1 = y1 * orig_h / float(image_size)
+            x2 = x2 * orig_w / float(image_size)
+            y2 = y2 * orig_h / float(image_size)
 
             boxes.append((x1, y1, x2, y2, final_score, class_idx))
 
