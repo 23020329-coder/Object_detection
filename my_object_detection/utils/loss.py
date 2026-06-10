@@ -8,8 +8,12 @@ class YoloLoss(nn.Module):
         self.S = S
         self.C = C
         
-        # Chuyển Objectness sang BCELoss (vì logit đã được qua sigmoid ở model)
+        # Objectness: BCELoss (vì logit đã qua sigmoid ở model)
         self.bce = nn.BCELoss(reduction='sum')
+        
+        # Classification: CrossEntropyLoss (softmax bên trong)
+        # → Nhất quán với softmax dùng trong inference/metrics.py
+        self.ce = nn.CrossEntropyLoss(reduction='sum')
         
         self.lambda_noobj = 0.5
         self.lambda_coord = 5.0
@@ -18,8 +22,7 @@ class YoloLoss(nn.Module):
         obj_mask = targets[..., self.C] == 1.0     
         noobj_mask = targets[..., self.C] == 0.0
 
-        # 1. REGRESSION LOSS (Thay MSE bằng CIoU Loss siêu việt)
-       # 1. REGRESSION LOSS (CIoU Loss)
+        # 1. REGRESSION LOSS (CIoU Loss)
         box_preds = predictions[..., self.C+1 : self.C+5][obj_mask]
         box_targets = targets[..., self.C+1 : self.C+5][obj_mask]
         
@@ -66,10 +69,17 @@ class YoloLoss(nn.Module):
         noobj_targets = targets[..., self.C][noobj_mask]
         no_object_loss = self.bce(noobj_preds, noobj_targets) if len(noobj_preds) > 0 else torch.tensor(0.0).to(predictions.device)
         
-        # 3. CLASSIFICATION LOSS (Focal Loss)
-        class_preds = predictions[..., :self.C][obj_mask]
-        class_targets = targets[..., :self.C][obj_mask]
-        class_loss = ops.sigmoid_focal_loss(class_preds, class_targets, alpha=0.25, gamma=2.0, reduction='sum') if len(class_preds) > 0 else torch.tensor(0.0).to(predictions.device)
+        # 3. CLASSIFICATION LOSS (CrossEntropyLoss)
+        class_preds = predictions[..., :self.C][obj_mask]   # [N, C] raw logits
+        class_targets = targets[..., :self.C][obj_mask]     # [N, C] one-hot
+        
+        if len(class_preds) > 0:
+            # Chuyển one-hot thành class index [N] để dùng CrossEntropyLoss
+            class_indices = class_targets.argmax(dim=-1).long()  # [N]
+            # CrossEntropyLoss áp dụng log-softmax bên trong → nhất quán với inference
+            class_loss = self.ce(class_preds, class_indices)
+        else:
+            class_loss = torch.tensor(0.0).to(predictions.device)
 
         # Tổng hợp Loss (Composite Loss)
         total_loss = (

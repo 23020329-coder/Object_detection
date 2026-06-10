@@ -27,6 +27,9 @@ class YoloResNet(nn.Module):
         
         x = x.permute(0, 2, 3, 1)      
         
+        # [QUAN TRỌNG] Ép kiểu về Float32 trước khi tính Sigmoid để tránh tràn số (Precision Loss) do AMP
+        x = x.float()
+        
         out = x.clone()
         # Áp dụng sigmoid cho khoảng Objectness và Bounding Box
         out[..., self.C:] = torch.sigmoid(x[..., self.C:])
