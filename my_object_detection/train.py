@@ -80,7 +80,7 @@ def train(args):
     best_map = 0.0
 
     print("Bắt đầu huấn luyện...")
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
     
     for epoch in range(args.epochs):
         model.train()
@@ -92,9 +92,11 @@ def train(args):
             targets = targets.to(device)
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 predictions = model(images)
-                loss = criterion(predictions, targets)
+                
+            # Đưa ra ngoài autocast và tính toán loss ở Float32 để tránh lỗi BCELoss
+            loss = criterion(predictions.float(), targets.float())
                 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
