@@ -7,17 +7,21 @@ import torch
 
 # Anchors (width, height) tính bằng pixel cho ảnh 640×640
 # Dựa trên YOLOv3 COCO anchors, được scale lên cho 640px
+# Đã tăng kích thước anchor P5 để bắt được vật thể cực lớn (chó/mèo chiếm toàn khung hình)
 ANCHORS = [
     # Scale 0: P3 (stride 8, grid 80×80) — Vật thể NHỎ
     [(15, 20), (24, 46), (50, 35)],
     # Scale 1: P4 (stride 16, grid 40×40) — Vật thể VỪA
     [(46, 94), (95, 69), (90, 183)],
     # Scale 2: P5 (stride 32, grid 20×20) — Vật thể LỚN
-    [(178, 138), (240, 305), (460, 400)],
+    [(178, 138), (300, 340), (520, 480)],
 ]
 
 STRIDES = [8, 16, 32]
 NUM_ANCHORS_PER_SCALE = 3
+
+# Ngưỡng IoU tối thiểu để gán GT vào anchor (Multi-Anchor Assignment)
+MULTI_ANCHOR_IOU_THRESH = 0.25
 
 
 def get_anchors():
@@ -61,3 +65,20 @@ def find_best_anchor(gt_w, gt_h):
                 best_anchor = anchor_idx
 
     return best_scale, best_anchor
+
+
+def find_matching_anchors(gt_w, gt_h, iou_thresh=MULTI_ANCHOR_IOU_THRESH):
+    """
+    Tìm TẤT CẢ anchors phù hợp cho 1 GT box (Multi-Anchor Assignment).
+    Trả về danh sách (iou, scale_idx, anchor_idx) đã sắp xếp giảm dần theo IoU.
+    Luôn trả về ít nhất 1 anchor (anchor tốt nhất).
+    """
+    candidates = []
+    for scale_idx, scale_anchors in enumerate(ANCHORS):
+        for anchor_idx, (aw, ah) in enumerate(scale_anchors):
+            iou = anchor_wh_iou((aw, ah), (gt_w, gt_h))
+            candidates.append((iou, scale_idx, anchor_idx))
+
+    # Sắp xếp theo IoU giảm dần
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates

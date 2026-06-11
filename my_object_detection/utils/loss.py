@@ -3,6 +3,10 @@ YOLOv3-style Multi-Scale Loss Function.
 - Objectness: BCEWithLogitsLoss (ổn định hơn BCELoss, AMP-safe)
 - Classification: Sigmoid Focal Loss (nhất quán với sigmoid inference)
 - Regression: CIoU Loss
+
+Cải tiến:
+- Giảm lambda_noobj từ 0.5 → 0.35 để giảm phạt oan khi dataset thiếu nhãn.
+- Mô hình sẽ tự tin hơn khi đoán trúng vật thể chưa được gán nhãn trong GT.
 """
 import torch
 import torch.nn as nn
@@ -25,7 +29,7 @@ class YoloLoss(nn.Module):
         # Hệ số cân bằng các thành phần loss
         self.lambda_coord = 5.0
         self.lambda_obj = 1.0
-        self.lambda_noobj = 0.5
+        self.lambda_noobj = 0.35   # Giảm từ 0.5 → 0.35: giảm phạt oan khi data thiếu nhãn
         self.lambda_cls = 1.0
 
         # Focal Loss parameters

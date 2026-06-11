@@ -1,6 +1,12 @@
 """
 Dataset cho kiến trúc YOLOv3-style Multi-Scale Anchor-Based.
 Sinh 3 label tensors cho 3 detection scales (P3, P4, P5).
+
+Cải tiến:
+- Multi-Anchor Assignment: Mỗi GT box được gán cho NHIỀU anchors phù hợp (IoU > 0.25),
+  thay vì chỉ 1 anchor duy nhất. Giúp tăng mạnh Recall.
+- Fallback Assignment: Nếu slot tốt nhất bị chiếm, tự động đẩy sang anchor kế tiếp.
+  Giải quyết vấn đề vật thể chồng lấp (person + chair cùng ô lưới).
 """
 import json
 import math
@@ -15,7 +21,10 @@ import torch
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import Dataset
 
-from utils.anchors import ANCHORS, STRIDES, NUM_ANCHORS_PER_SCALE, find_best_anchor
+from utils.anchors import (
+    ANCHORS, STRIDES, NUM_ANCHORS_PER_SCALE,
+    find_best_anchor, find_matching_anchors, MULTI_ANCHOR_IOU_THRESH
+)
 
 
 def parse_annotations(json_path):
@@ -63,8 +72,12 @@ class ObjectDetectionDataset(Dataset):
 
     def create_label_matrix(self, image, bboxes, labels):
         """
-        Sinh 3 label tensors cho 3 scales.
-        Mỗi GT box được assign vào anchor phù hợp nhất (theo IoU width/height).
+        Sinh 3 label tensors cho 3 scales với Multi-Anchor Assignment.
+
+        Thay đổi so với bản cũ:
+        - Mỗi GT box được gán cho TẤT CẢ anchors có IoU > 0.25 (thay vì chỉ 1 anchor).
+        - Nếu anchor tốt nhất đã bị chiếm, GT tự động được gán cho anchor kế tiếp.
+        - Giải quyết triệt để vấn đề 2 vật thể chồng lấp trong cùng 1 ô lưới.
 
         Returns: image, tgt_s, tgt_m, tgt_l
             Mỗi target: [S, S, A, 5+C]
@@ -87,33 +100,39 @@ class ObjectDetectionDataset(Dataset):
             if w <= 0 or h <= 0:
                 continue
 
-            # Tìm anchor phù hợp nhất theo IoU width/height
-            best_scale, best_anchor = find_best_anchor(w, h)
+            # === Multi-Anchor Assignment ===
+            # Tìm tất cả anchor phù hợp, sắp xếp theo IoU giảm dần
+            candidates = find_matching_anchors(w, h, MULTI_ANCHOR_IOU_THRESH)
 
-            stride = self.strides[best_scale]
-            S = self.image_size // stride
-            anchor_w, anchor_h = self.anchors[best_scale][best_anchor]
+            assigned = False
+            for iou_val, scale_idx, anchor_idx in candidates:
+                # Dừng nếu IoU quá thấp VÀ đã gán được ít nhất 1 anchor
+                if iou_val < MULTI_ANCHOR_IOU_THRESH and assigned:
+                    break
 
-            # Xác định ô lưới
-            gj = int(cx / stride)
-            gi = int(cy / stride)
-            gj = min(gj, S - 1)
-            gi = min(gi, S - 1)
+                stride = self.strides[scale_idx]
+                S = self.image_size // stride
+                anchor_w, anchor_h = self.anchors[scale_idx][anchor_idx]
 
-            # Chỉ assign nếu slot còn trống
-            if targets[best_scale][gi, gj, best_anchor, 4] == 0:
-                # Encode target offsets
-                tx = cx / stride - gj        # x offset trong ô [0, 1)
-                ty = cy / stride - gi        # y offset trong ô [0, 1)
-                tw = math.log(w / anchor_w + 1e-16)   # log scale relative to anchor
-                th = math.log(h / anchor_h + 1e-16)
+                # Xác định ô lưới
+                gj = min(int(cx / stride), S - 1)
+                gi = min(int(cy / stride), S - 1)
 
-                targets[best_scale][gi, gj, best_anchor, 0] = tx
-                targets[best_scale][gi, gj, best_anchor, 1] = ty
-                targets[best_scale][gi, gj, best_anchor, 2] = tw
-                targets[best_scale][gi, gj, best_anchor, 3] = th
-                targets[best_scale][gi, gj, best_anchor, 4] = 1.0   # objectness
-                targets[best_scale][gi, gj, best_anchor, 5 + int(class_label)] = 1.0  # class
+                # Chỉ assign nếu slot còn trống
+                if targets[scale_idx][gi, gj, anchor_idx, 4] == 0:
+                    # Encode target offsets
+                    tx = cx / stride - gj        # x offset trong ô [0, 1)
+                    ty = cy / stride - gi        # y offset trong ô [0, 1)
+                    tw = math.log(w / anchor_w + 1e-16)   # log scale relative to anchor
+                    th = math.log(h / anchor_h + 1e-16)
+
+                    targets[scale_idx][gi, gj, anchor_idx, 0] = tx
+                    targets[scale_idx][gi, gj, anchor_idx, 1] = ty
+                    targets[scale_idx][gi, gj, anchor_idx, 2] = tw
+                    targets[scale_idx][gi, gj, anchor_idx, 3] = th
+                    targets[scale_idx][gi, gj, anchor_idx, 4] = 1.0   # objectness
+                    targets[scale_idx][gi, gj, anchor_idx, 5 + int(class_label)] = 1.0  # class
+                    assigned = True
 
         return image, targets[0], targets[1], targets[2]
 
