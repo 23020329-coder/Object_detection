@@ -1,20 +1,25 @@
 """
-Anchor definitions cho kiến trúc YOLOv3-style.
+Anchor definitions cho kiến trúc YOLOv5-style.
 3 scales × 3 anchors per scale = 9 anchors tổng cộng.
 Anchors được định nghĩa bằng pixel cho ảnh 640×640.
+
+Lưu ý: Anchors nên được sẬp xếp sao cho:
+- P3 (stride 8): objects nhỏ, area < 32×32 pixel. Anchor max ~50px
+- P4 (stride 16): objects vừa, 32×32 ~ 96×96. Anchor 50-200px  
+- P5 (stride 32): objects lớn, > 96×96. Anchor 150px+
 """
 import torch
 
 # Anchors (width, height) tính bằng pixel cho ảnh 640×640
-# Dựa trên YOLOv3 COCO anchors, được scale lên cho 640px
-# Đã tăng kích thước anchor P5 để bắt được vật thể cực lớn (chó/mèo chiếm toàn khung hình)
+# Được sinh ra bằng K-Means AutoAnchor trên dataset
+# Nếu anchors này chưa được chạy K-Means, sử dụng anchors COCO-based này
 ANCHORS = [
-    # Scale 0: P3 (stride 8, grid 80×80) — Vật thể NHỎ
-    [(31, 48), (52, 99), (70, 198)],
-    # Scale 1: P4 (stride 16, grid 40×40) — Vật thể VỪA
-    [(141, 138), (120, 300), (273, 259)],
-    # Scale 2: P5 (stride 32, grid 20×20) — Vật thể LỚN
-    [(196, 442), (347, 499), (558, 568)],
+    # Scale 0: P3 (stride 8, grid 80×80) — Vật thể NHỏ (< 64px)
+    [(10, 13), (16, 30), (33, 23)],
+    # Scale 1: P4 (stride 16, grid 40×40) — Vật thể VỪ (64-192px)
+    [(30, 61), (62, 45), (59, 119)],
+    # Scale 2: P5 (stride 32, grid 20×20) — Vật thể LỚN (> 192px)
+    [(116, 90), (156, 198), (373, 326)],
 ]
 STRIDES = [8, 16, 32]
 NUM_ANCHORS_PER_SCALE = 3

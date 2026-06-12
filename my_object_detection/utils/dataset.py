@@ -139,8 +139,10 @@ class ObjectDetectionDataset(Dataset):
                         # Raw offset từ cell hiện tại (có thể < 0 hoặc > 1 cho neighbors)
                         tx = gx - cj
                         ty = gy - ci
-                        tw = math.log(w / anchor_w + 1e-16)
-                        th = math.log(h / anchor_h + 1e-16)
+                        # Lưu w, h pixel trực tiếp (KHÔNG encode log/exp)
+                        # Loss sẽ decode pred bằng sigmoid², so sánh trực tiếp với w/h pixel
+                        tw = w
+                        th = h
 
                         targets[scale_idx][ci, cj, anchor_idx, 0] = tx
                         targets[scale_idx][ci, cj, anchor_idx, 1] = ty
@@ -190,15 +192,15 @@ class MosaicMixUpDataset(Dataset):
             return self.base[idx]
 
     def _mixup(self, idx):
-        """MixUp: Trộn 2 ảnh và merge targets."""
+        """MixUp: Trộn 2 ảnh đã qua transform (tensor) và merge targets."""
         img1, tgt_s1, tgt_m1, tgt_l1 = self.base[idx]
         idx2 = random.randint(0, len(self.base) - 1)
         img2, tgt_s2, tgt_m2, tgt_l2 = self.base[idx2]
 
-        lam = np.random.beta(1.5, 1.5)
-        lam = max(lam, 1 - lam)  # Đảm bảo lambda >= 0.5 (ảnh 1 chiếm ưu thế)
+        lam = np.random.beta(8.0, 8.0)  # Beta hẹp hơn — gần 0.5 hơn, ít extreme blending
 
-        mixed_img = lam * img1 + (1 - lam) * img2
+        # img1, img2 đã là tensor [3, H, W] normalized — trộn trực tiếp
+        mixed_img = lam * img1.float() + (1 - lam) * img2.float()
 
         # Merge targets: giữ ảnh 1 ở nơi xung đột, copy ảnh 2 ở nơi trống
         def merge(t1, t2):
@@ -238,21 +240,34 @@ class MosaicMixUpDataset(Dataset):
                 mosaic_bboxes.append([xmin, ymin, xmax, ymax])
                 mosaic_labels.append(label)
 
-        # Thu nhỏ 2x2 → 1x1
+        # Thu nhỏ 2x2 → 1x1 — sau đó mới normalize (transform không có Resize nữa)
         mosaic_image = cv2.resize(mosaic_image, (sz, sz))
         for bbox in mosaic_bboxes:
-            bbox[0] /= 2.0
-            bbox[1] /= 2.0
-            bbox[2] /= 2.0
-            bbox[3] /= 2.0
+            bbox[0] = max(0.0, min(bbox[0] / 2.0, sz))
+            bbox[1] = max(0.0, min(bbox[1] / 2.0, sz))
+            bbox[2] = max(0.0, min(bbox[2] / 2.0, sz))
+            bbox[3] = max(0.0, min(bbox[3] / 2.0, sz))
 
-        if self.base.transform:
-            transformed = self.base.transform(
-                image=mosaic_image, bboxes=mosaic_bboxes, class_labels=mosaic_labels
-            )
-            mosaic_image = transformed['image']
-            mosaic_bboxes = transformed['bboxes']
-            mosaic_labels = transformed['class_labels']
+        # CHỈ apply Normalize + ToTensor, KHÔNG apply Resize/Affine
+        # vì ảnh mosaic đã chính xác sz × sz rồi
+        mosaic_transform = A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.3),
+            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ToTensorV2(),
+        ], bbox_params=A.BboxParams(
+            format='pascal_voc',
+            label_fields=['class_labels'],
+            min_area=100,
+            min_visibility=0.1
+        ))
+
+        transformed = mosaic_transform(
+            image=mosaic_image, bboxes=mosaic_bboxes, class_labels=mosaic_labels
+        )
+        mosaic_image = transformed['image']
+        mosaic_bboxes = transformed['bboxes']
+        mosaic_labels = transformed['class_labels']
 
         return self.base.create_label_matrix(mosaic_image, mosaic_bboxes, mosaic_labels)
 

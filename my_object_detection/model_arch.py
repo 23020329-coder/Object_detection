@@ -127,13 +127,12 @@ class YoloResNet(nn.Module):
         p5 = self.lat5(c5)     # [B, 256, 20, 20]
         p5 = self.sppf(p5)     # [B, 256, 20, 20] — receptive field mở rộng
 
-        # === FPN Top-Down ===
+        # === FPN Top-Down (cascade smooth — smooth TRƯỚC khi upsample) ===
+        p5 = self.fpn5(p5)    # Smooth P5 trước
         p4 = self.lat4(c4) + F.interpolate(p5, size=c4.shape[2:], mode='nearest')
+        p4 = self.fpn4(p4)    # Smooth P4 trước khi upsample cho P3
         p3 = self.lat3(c3) + F.interpolate(p4, size=c3.shape[2:], mode='nearest')
-
-        p5 = self.fpn5(p5)    # [B, 256, 20, 20]
-        p4 = self.fpn4(p4)    # [B, 256, 40, 40]
-        p3 = self.fpn3(p3)    # [B, 256, 80, 80]
+        p3 = self.fpn3(p3)    # Smooth P3
 
         # === PANet Bottom-Up ===
         n3 = p3                                                      # [B, 256, 80, 80]

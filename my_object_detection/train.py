@@ -19,34 +19,31 @@ from model_arch import YoloResNet
 
 # === EMA (Exponential Moving Average) ===
 class EMA:
-    """Giữ bản sao 'mượt' của trọng số model. Dùng để evaluate & save checkpoint."""
+    """Giữ bản sao 'mượt' của TRỌcN BỘ model (weights + BN buffers). Dùng để evaluate & save."""
     def __init__(self, model, decay=0.9999):
         self.decay = decay
         self.updates = 0
-        self.shadow = {}
+        # Dùng state_dict() để track TẤT CẢ: weights, biases, BN running_mean/var
+        self.shadow = copy.deepcopy(model.state_dict())
         self.backup = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
 
     def update(self, model):
         self.updates += 1
         # Dynamic decay cho những epoch đầu (giống YOLOv5/v8)
         d = self.decay * (1 - math.exp(-self.updates / 2000))
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = d * self.shadow[name] + (1 - d) * param.data
+        current = model.state_dict()
+        for key in self.shadow:
+            if current[key].dtype.is_floating_point:
+                self.shadow[key] = d * self.shadow[key] + (1 - d) * current[key]
+            else:
+                self.shadow[key] = current[key]  # num_batches_tracked (int)
 
     def apply_shadow(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.backup[name] = param.data.clone()
-                param.data = self.shadow[name]
+        self.backup = copy.deepcopy(model.state_dict())
+        model.load_state_dict(self.shadow)
 
     def restore(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                param.data = self.backup[name]
+        model.load_state_dict(self.backup)
         self.backup = {}
 
 
@@ -125,7 +122,7 @@ def train(args):
         if epoch < warmup_epochs:
             return (epoch + 1) / warmup_epochs
         progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
-        return 0.5 * (1 + math.cos(math.pi * progress))
+        return max(0.01, 0.5 * (1 + math.cos(math.pi * progress)))  # min LR = 1%
 
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -158,15 +155,13 @@ def train(args):
             optimizer.zero_grad()
             with torch.amp.autocast('cuda'):
                 out_s, out_m, out_l = model(images)
-
-            # Loss ở Float32
-            predictions = (out_s.float(), out_m.float(), out_l.float())
-            targets = (tgt_s.float(), tgt_m.float(), tgt_l.float())
-            loss = criterion(predictions, targets)
+                predictions = (out_s.float(), out_m.float(), out_l.float())
+                targets = (tgt_s.float(), tgt_m.float(), tgt_l.float())
+                loss = criterion(predictions, targets)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # giảm từ 10 → 1.0
             scaler.step(optimizer)
             scaler.update()
 

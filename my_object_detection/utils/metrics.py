@@ -187,11 +187,11 @@ def decode_multi_scale(model_outputs, image_size, C, conf_threshold=0.15):
         tw = pred[i_idx, j_idx, a_idx, 2]
         th = pred[i_idx, j_idx, a_idx, 3]
 
-        # YOLOv5-style: range [-0.5, 1.5] thay vì [0, 1]
+        # YOLOv5-style decode: center + anchor-relative wh via sigmoid^2
         cx = (torch.sigmoid(tx) * 2.0 - 0.5 + j_idx.float()) * stride
         cy = (torch.sigmoid(ty) * 2.0 - 0.5 + i_idx.float()) * stride
-        bw = aw * torch.exp(tw.clamp(max=5.0))
-        bh = ah * torch.exp(th.clamp(max=5.0))
+        bw = aw * (torch.sigmoid(tw) * 2.0) ** 2
+        bh = ah * (torch.sigmoid(th) * 2.0) ** 2
 
         x1 = (cx - bw / 2).clamp(min=0)
         y1 = (cy - bh / 2).clamp(min=0)
