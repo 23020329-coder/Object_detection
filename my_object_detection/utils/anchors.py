@@ -10,13 +10,12 @@ import torch
 # Đã tăng kích thước anchor P5 để bắt được vật thể cực lớn (chó/mèo chiếm toàn khung hình)
 ANCHORS = [
     # Scale 0: P3 (stride 8, grid 80×80) — Vật thể NHỎ
-    [(15, 20), (24, 46), (50, 35)],
+    [(31, 48), (52, 99), (70, 198)],
     # Scale 1: P4 (stride 16, grid 40×40) — Vật thể VỪA
-    [(46, 94), (95, 69), (90, 183)],
+    [(141, 138), (120, 300), (273, 259)],
     # Scale 2: P5 (stride 32, grid 20×20) — Vật thể LỚN
-    [(178, 138), (300, 340), (520, 480)],
+    [(196, 442), (347, 499), (558, 568)],
 ]
-
 STRIDES = [8, 16, 32]
 NUM_ANCHORS_PER_SCALE = 3
 
