@@ -187,8 +187,9 @@ def decode_multi_scale(model_outputs, image_size, C, conf_threshold=0.15):
         tw = pred[i_idx, j_idx, a_idx, 2]
         th = pred[i_idx, j_idx, a_idx, 3]
 
-        cx = (torch.sigmoid(tx) + j_idx.float()) * stride
-        cy = (torch.sigmoid(ty) + i_idx.float()) * stride
+        # YOLOv5-style: range [-0.5, 1.5] thay vì [0, 1]
+        cx = (torch.sigmoid(tx) * 2.0 - 0.5 + j_idx.float()) * stride
+        cy = (torch.sigmoid(ty) * 2.0 - 0.5 + i_idx.float()) * stride
         bw = aw * torch.exp(tw.clamp(max=5.0))
         bh = ah * torch.exp(th.clamp(max=5.0))
 

@@ -1,12 +1,12 @@
 """
-YOLOv3-style Multi-Scale Loss Function.
-- Objectness: BCEWithLogitsLoss (ổn định hơn BCELoss, AMP-safe)
-- Classification: Sigmoid Focal Loss (nhất quán với sigmoid inference)
-- Regression: CIoU Loss
+YOLOv5-style Multi-Scale Loss Function.
 
-Cải tiến:
-- Giảm lambda_noobj từ 0.5 → 0.35 để giảm phạt oan khi dataset thiếu nhãn.
-- Mô hình sẽ tự tin hơn khi đoán trúng vật thể chưa được gán nhãn trong GT.
+Nâng cấp:
+- Center decode: sigmoid(tx) * 2 - 0.5 (range [-0.5, 1.5] thay vì [0, 1])
+  → Hỗ trợ multi-cell assignment (model có thể predict tâm ngoài ô hiện tại)
+- IoU-aware objectness: target obj = IoU(pred, gt) thay vì 1.0 cố định
+  → Model tự đánh giá chất lượng box chính xác hơn, giảm false positives
+- BCEWithLogitsLoss + Sigmoid Focal Loss + CIoU (giữ nguyên)
 """
 import torch
 import torch.nn as nn
@@ -20,81 +20,88 @@ class YoloLoss(nn.Module):
         self.C = C
         self.image_size = image_size
         self.strides = STRIDES
-        self.anchors = get_anchor_tensors()  # list of 3 tensors [3, 2]
+        self.anchors = get_anchor_tensors()
 
-        # BCEWithLogitsLoss: nhận raw logit, tự áp dụng sigmoid bên trong
-        # → Không cần sigmoid trong model → AMP-safe tự nhiên
         self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
 
-        # Hệ số cân bằng các thành phần loss
-        self.lambda_coord = 5.0
+        # Hệ số loss — giảm lambda_coord vì multi-cell tạo nhiều positive hơn
+        self.lambda_coord = 3.5
         self.lambda_obj = 1.0
-        self.lambda_noobj = 0.35   # Giảm từ 0.5 → 0.35: giảm phạt oan khi data thiếu nhãn
-        self.lambda_cls = 1.0
+        self.lambda_noobj = 0.5
+        self.lambda_cls = 0.5
 
-        # Focal Loss parameters
+        # Focal Loss
         self.focal_alpha = 0.25
         self.focal_gamma = 2.0
 
     def forward(self, predictions, targets):
         """
-        predictions: tuple (out_s, out_m, out_l), each [B, S, S, A, 5+C] raw logits
+        predictions: tuple (out_s, out_m, out_l), each [B, S, S, A, 5+C]
         targets: tuple (tgt_s, tgt_m, tgt_l), each [B, S, S, A, 5+C]
-
-        Target format per anchor:
-            [0] tx, [1] ty, [2] tw, [3] th, [4] objectness, [5:5+C] one-hot class
         """
         total_box_loss = 0.0
         total_obj_loss = 0.0
         total_cls_loss = 0.0
         device = predictions[0].device
+        num_total_pos = 0
 
         for scale_idx, (pred, tgt) in enumerate(zip(predictions, targets)):
-            anchors = self.anchors[scale_idx].to(device)  # [3, 2]
+            anchors = self.anchors[scale_idx].to(device)
             stride = self.strides[scale_idx]
 
-            obj_mask = tgt[..., 4] == 1.0      # [B, S, S, A] — ô có vật thể
-            noobj_mask = tgt[..., 4] == 0.0    # [B, S, S, A] — ô trống
+            obj_mask = tgt[..., 4] == 1.0
+            noobj_mask = tgt[..., 4] == 0.0
+            num_pos = obj_mask.sum().item()
+            num_total_pos += num_pos
 
-            # === 1. Objectness Loss (BCEWithLogitsLoss) ===
-            obj_loss_map = self.bce_obj(pred[..., 4], tgt[..., 4])
+            # Objectness target — sẽ được cập nhật với IoU nếu có positive
+            obj_target = tgt[..., 4].clone()
+
+            if num_pos > 0:
+                # === 1. Decode boxes ===
+                pred_boxes = self._decode_boxes(pred, anchors, stride, obj_mask)
+                tgt_boxes = self._decode_target_boxes(tgt, anchors, stride, obj_mask)
+
+                # === 2. Box Loss (CIoU) ===
+                box_loss = ops.complete_box_iou_loss(pred_boxes, tgt_boxes, reduction='sum')
+                total_box_loss += box_loss
+
+                # === 3. IoU-aware Objectness Target ===
+                with torch.no_grad():
+                    ious = self._pairwise_iou(pred_boxes, tgt_boxes)
+                    obj_target[obj_mask] = ious.clamp(0).detach()
+
+                # === 4. Classification Loss (Sigmoid Focal Loss) ===
+                cls_pred = pred[..., 5:5 + self.C][obj_mask]
+                cls_tgt = tgt[..., 5:5 + self.C][obj_mask]
+                cls_loss = ops.sigmoid_focal_loss(
+                    cls_pred, cls_tgt,
+                    alpha=self.focal_alpha, gamma=self.focal_gamma,
+                    reduction='sum'
+                )
+                total_cls_loss += cls_loss
+
+            # === 5. Objectness Loss ===
+            obj_loss_map = self.bce_obj(pred[..., 4], obj_target)
             obj_loss = (
                 self.lambda_obj * obj_loss_map[obj_mask].sum() +
                 self.lambda_noobj * obj_loss_map[noobj_mask].sum()
             )
             total_obj_loss += obj_loss
 
-            num_pos = obj_mask.sum().item()
-            if num_pos == 0:
-                continue
-
-            # === 2. Box Regression Loss (CIoU) ===
-            pred_boxes = self._decode_boxes(pred, anchors, stride, obj_mask)
-            tgt_boxes = self._decode_target_boxes(tgt, anchors, stride, obj_mask)
-            box_loss = ops.complete_box_iou_loss(pred_boxes, tgt_boxes, reduction='sum')
-            total_box_loss += box_loss
-
-            # === 3. Classification Loss (Sigmoid Focal Loss) ===
-            cls_pred = pred[..., 5:5 + self.C][obj_mask]   # [N, C] raw logits
-            cls_tgt = tgt[..., 5:5 + self.C][obj_mask]     # [N, C] one-hot
-            cls_loss = ops.sigmoid_focal_loss(
-                cls_pred, cls_tgt,
-                alpha=self.focal_alpha, gamma=self.focal_gamma,
-                reduction='sum'
-            )
-            total_cls_loss += cls_loss
-
-        batch_size = predictions[0].shape[0]
+        # Normalize
+        num_total_pos = max(num_total_pos, 1)
         total_loss = (
-            self.lambda_coord * total_box_loss
-            + total_obj_loss
-            + self.lambda_cls * total_cls_loss
+            self.lambda_coord * total_box_loss / num_total_pos
+            + total_obj_loss / predictions[0].shape[0]
+            + self.lambda_cls * total_cls_loss / num_total_pos
         )
-        return total_loss / batch_size
+        return total_loss
 
     def _decode_boxes(self, pred, anchors, stride, mask):
-        """Decode predicted boxes → [x1, y1, x2, y2] normalized [0, 1]."""
-        indices = mask.nonzero(as_tuple=False)  # [N, 4]: (batch, i, j, anchor)
+        """Decode predicted boxes → [x1, y1, x2, y2] normalized [0, 1].
+        YOLOv5-style: sigmoid(tx) * 2 - 0.5 cho range [-0.5, 1.5]."""
+        indices = mask.nonzero(as_tuple=False)
         b, gi, gj, a = indices[:, 0], indices[:, 1], indices[:, 2], indices[:, 3]
 
         tx = pred[b, gi, gj, a, 0]
@@ -105,8 +112,9 @@ class YoloLoss(nn.Module):
         aw = anchors[a, 0]
         ah = anchors[a, 1]
 
-        cx = (torch.sigmoid(tx) + gj.float()) * stride / self.image_size
-        cy = (torch.sigmoid(ty) + gi.float()) * stride / self.image_size
+        # YOLOv5 center decode: range [-0.5, 1.5] thay vì [0, 1]
+        cx = (torch.sigmoid(tx) * 2.0 - 0.5 + gj.float()) * stride / self.image_size
+        cy = (torch.sigmoid(ty) * 2.0 - 0.5 + gi.float()) * stride / self.image_size
         w = aw * torch.exp(tw.clamp(max=5.0)) / self.image_size
         h = ah * torch.exp(th.clamp(max=5.0)) / self.image_size
 
@@ -118,7 +126,8 @@ class YoloLoss(nn.Module):
         return torch.stack([x1, y1, x2, y2], dim=-1)
 
     def _decode_target_boxes(self, tgt, anchors, stride, mask):
-        """Decode target boxes → [x1, y1, x2, y2] normalized [0, 1]."""
+        """Decode target boxes → [x1, y1, x2, y2] normalized [0, 1].
+        Target tx/ty đã là raw offset, không cần sigmoid."""
         indices = mask.nonzero(as_tuple=False)
         b, gi, gj, a = indices[:, 0], indices[:, 1], indices[:, 2], indices[:, 3]
 
@@ -141,3 +150,17 @@ class YoloLoss(nn.Module):
         y2 = cy + h / 2
 
         return torch.stack([x1, y1, x2, y2], dim=-1)
+
+    @staticmethod
+    def _pairwise_iou(boxes1, boxes2):
+        """Tính IoU cho từng cặp box tương ứng (element-wise, KHÔNG phải matrix)."""
+        x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
+        y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
+        x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
+        y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+
+        inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+
+        return inter / (area1 + area2 - inter + 1e-7)

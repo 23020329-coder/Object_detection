@@ -11,7 +11,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicDataset, get_train_transform
+from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicMixUpDataset, get_train_transform
 from utils.loss import YoloLoss
 from utils.metrics import evaluate_model_map
 from model_arch import YoloResNet
@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument("--image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh train")
     parser.add_argument("--val_image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh validation")
     parser.add_argument("--checkpoint_dir", type=str, required=True, help="Thư mục lưu mô hình")
-    parser.add_argument("--epochs", type=int, default=40, help="Số lượng epoch")
+    parser.add_argument("--epochs", type=int, default=50, help="Số lượng epoch")
     parser.add_argument("--batch_size", type=int, default=16, help="Kích thước batch")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--image_size", type=int, default=640, help="Kích thước ảnh")
@@ -91,7 +91,7 @@ def train(args):
         image_size=args.image_size
     )
 
-    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.5)
+    train_dataset = MosaicMixUpDataset(base_train_dataset, mosaic_prob=0.7, mixup_prob=0.1)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
