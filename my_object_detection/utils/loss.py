@@ -24,10 +24,9 @@ class YoloLoss(nn.Module):
 
         self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
 
-        # Hệ số loss — tuned cho .mean() normalization
+        # Hệ số loss (YOLOv5-style)
         self.lambda_coord = 5.0
-        self.lambda_obj   = 4.0   # Tăng vì .mean() cho ít positive cells
-        self.lambda_noobj = 1.0
+        self.lambda_obj   = 1.0   # Hệ số objectness (applied to total_obj_loss)
         self.lambda_cls   = 1.0
 
         # Focal Loss
@@ -98,7 +97,7 @@ class YoloLoss(nn.Module):
         num_total_pos = max(num_total_pos, 1)
         total_loss = (
             self.lambda_coord * total_box_loss / num_total_pos
-            + total_obj_loss
+            + self.lambda_obj * total_obj_loss
             + self.lambda_cls * total_cls_loss / num_total_pos
         )
         return total_loss
