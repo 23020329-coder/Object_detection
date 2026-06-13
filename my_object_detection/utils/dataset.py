@@ -4,8 +4,10 @@ Dataset cho kiến trúc YOLOv5-style Multi-Scale Anchor-Based.
 Nâng cấp:
 - Multi-Cell Assignment (YOLOv5-style): Mỗi GT box gán vào center cell + 2 neighbor cells
   → Tăng 3× positive samples → model học nhanh và chính xác hơn
-- Mosaic 70% + MixUp 10% + Normal 20%
+- Mosaic 70% (tắt hoàn toàn ở 15 epochs cuối — Close Mosaic Strategy)
+- MixUp đã bị TẮT vì gây ảnh "ma" khiến model confused về biên vật thể
 - Target offset tx/ty: raw offset, có thể nằm ngoài [0, 1] cho neighbor cells
+- Multi-Scale Training: hỗ trợ thay đổi image_size giữa các epoch
 """
 import json
 import math
@@ -165,51 +167,30 @@ class ObjectDetectionDataset(Dataset):
         return self.create_label_matrix(image, bboxes, labels)
 
 
-class MosaicMixUpDataset(Dataset):
+class MosaicDataset(Dataset):
     """
-    Dataset Wrapper: Mosaic 70% + MixUp 10% + Normal 20%.
+    Dataset Wrapper: Mosaic + Normal (MixUp đã bị TẮT).
 
     - Mosaic: Ghép 4 ảnh thành 1 → tăng context, đa dạng hóa
-    - MixUp: Trộn 2 ảnh → ép model học soft boundary
     - Normal: Giữ ảnh gốc clean → tránh domain gap
+
+    Close Mosaic Strategy (YOLOv8):
+    - Epoch 1-35: Mosaic ON (70%)
+    - Epoch 36-50: Mosaic OFF (0%) → fine-tune trên ảnh clean
     """
 
-    def __init__(self, base_dataset, mosaic_prob=0.7, mixup_prob=0.1):
+    def __init__(self, base_dataset, mosaic_prob=0.7):
         self.base = base_dataset
         self.mosaic_prob = mosaic_prob
-        self.mixup_prob = mixup_prob
 
     def __len__(self):
         return len(self.base)
 
     def __getitem__(self, idx):
-        r = random.random()
-        if r < self.mixup_prob:
-            return self._mixup(idx)
-        elif r < self.mixup_prob + self.mosaic_prob:
+        if random.random() < self.mosaic_prob:
             return self._mosaic(idx)
         else:
             return self.base[idx]
-
-    def _mixup(self, idx):
-        """MixUp: Trộn 2 ảnh đã qua transform (tensor) và merge targets."""
-        img1, tgt_s1, tgt_m1, tgt_l1 = self.base[idx]
-        idx2 = random.randint(0, len(self.base) - 1)
-        img2, tgt_s2, tgt_m2, tgt_l2 = self.base[idx2]
-
-        lam = np.random.beta(8.0, 8.0)  # Beta hẹp hơn — gần 0.5 hơn, ít extreme blending
-
-        # img1, img2 đã là tensor [3, H, W] normalized — trộn trực tiếp
-        mixed_img = lam * img1.float() + (1 - lam) * img2.float()
-
-        # Merge targets: giữ ảnh 1 ở nơi xung đột, copy ảnh 2 ở nơi trống
-        def merge(t1, t2):
-            result = t1.clone()
-            only_t2 = (t2[..., 4] == 1.0) & (t1[..., 4] == 0.0)
-            result[only_t2] = t2[only_t2]
-            return result
-
-        return mixed_img, merge(tgt_s1, tgt_s2), merge(tgt_m1, tgt_m2), merge(tgt_l1, tgt_l2)
 
     def _mosaic(self, idx):
         """Mosaic: Ghép 4 ảnh thành 1 (YOLOv4-style)."""
@@ -242,14 +223,23 @@ class MosaicMixUpDataset(Dataset):
 
         # Thu nhỏ 2x2 → 1x1 — sau đó mới normalize (transform không có Resize nữa)
         mosaic_image = cv2.resize(mosaic_image, (sz, sz))
-        for bbox in mosaic_bboxes:
-            bbox[0] = max(0.0, min(bbox[0] / 2.0, sz))
-            bbox[1] = max(0.0, min(bbox[1] / 2.0, sz))
-            bbox[2] = max(0.0, min(bbox[2] / 2.0, sz))
-            bbox[3] = max(0.0, min(bbox[3] / 2.0, sz))
+        valid_bboxes = []
+        valid_labels = []
+        for bbox, label in zip(mosaic_bboxes, mosaic_labels):
+            x1 = max(0.0, min(bbox[0] / 2.0, sz))
+            y1 = max(0.0, min(bbox[1] / 2.0, sz))
+            x2 = max(0.0, min(bbox[2] / 2.0, sz))
+            y2 = max(0.0, min(bbox[3] / 2.0, sz))
+            
+            # Albumentations expects x1 < x2 and y1 < y2, otherwise it crashes
+            if x2 > x1 and y2 > y1:
+                valid_bboxes.append([x1, y1, x2, y2])
+                valid_labels.append(label)
+                
+        mosaic_bboxes = valid_bboxes
+        mosaic_labels = valid_labels
 
         # CHỈ apply Normalize + ToTensor, KHÔNG apply Resize/Affine
-        # vì ảnh mosaic đã chính xác sz × sz rồi
         mosaic_transform = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.3),

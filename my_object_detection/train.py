@@ -1,9 +1,11 @@
 """
-Training script cho YOLOv3-style detector.
-Bao gồm: AMP, Warmup, EMA, Gradient Clipping, Multi-scale targets.
+Training script cho YOLOv5-style Detector with Decoupled Heads.
+Bao gồm: AMP, Warmup, EMA, Gradient Clipping, Multi-Scale Training,
+          Close Mosaic Strategy, Cosine Annealing.
 """
 import math
 import os
+import random
 import argparse
 import copy
 import torch
@@ -11,7 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicMixUpDataset, get_train_transform
+from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicDataset, get_train_transform
 from utils.loss import YoloLoss
 from utils.metrics import evaluate_model_map
 from model_arch import YoloResNet
@@ -19,7 +21,7 @@ from model_arch import YoloResNet
 
 # === EMA (Exponential Moving Average) ===
 class EMA:
-    """Giữ bản sao 'mượt' của TRỌcN BỘ model (weights + BN buffers). Dùng để evaluate & save."""
+    """Giữ bản sao 'mượt' của TOÀN BỘ model (weights + BN buffers). Dùng để evaluate & save."""
     def __init__(self, model, decay=0.9999):
         self.decay = decay
         self.updates = 0
@@ -48,7 +50,7 @@ class EMA:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Huấn luyện YOLOv3-style Detector")
+    parser = argparse.ArgumentParser(description="Huấn luyện YOLOv5-style Detector")
     parser.add_argument("--train_data", type=str, required=True, help="Đường dẫn đến file json tập train")
     parser.add_argument("--val_data", type=str, required=True, help="Đường dẫn đến file json tập validation")
     parser.add_argument("--image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh train")
@@ -79,6 +81,7 @@ def train(args):
     C = len(classes)
     print(f"Số lượng class: {C} — {classes}")
 
+    # === Dataset (ban đầu với image_size mặc định) ===
     base_train_dataset = ObjectDetectionDataset(
         img_dir=args.image_dir,
         images_info=images_info,
@@ -88,18 +91,11 @@ def train(args):
         image_size=args.image_size
     )
 
-    train_dataset = MosaicMixUpDataset(base_train_dataset, mosaic_prob=0.7, mixup_prob=0.1)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-        prefetch_factor=2
-    )
+    # Mosaic ON (70%), MixUp đã bị TẮT
+    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.7)
 
     # === Khởi tạo Model, Loss, Optimizer ===
-    print(f"Khởi tạo YOLOv3-ResNet50 (FPN multi-scale) với ảnh {args.image_size}×{args.image_size}")
+    print(f"Khởi tạo YOLOv5-ResNet50 + Decoupled Heads với ảnh {args.image_size}×{args.image_size}")
     model = YoloResNet(num_classes=C).to(device)
     criterion = YoloLoss(C=C, image_size=args.image_size).to(device)
 
@@ -139,13 +135,49 @@ def train(args):
     best_loss = float('inf')
     best_map = 0.0
 
+    # === Multi-Scale & Close Mosaic Config ===
+    multi_scales = [512, 576, 640, 704]  # Bội số 32, range an toàn cho VRAM
+    close_mosaic_epoch = total_epochs - 15  # Tắt Mosaic từ epoch 36/50
+    print(f"Multi-Scale Training: {multi_scales}")
+    print(f"Close Mosaic Strategy: Tắt Mosaic từ epoch {close_mosaic_epoch + 1}")
+
     # === Training Loop ===
     print(f"Bắt đầu huấn luyện {total_epochs} epoch (warmup {warmup_epochs} epoch)...")
     for epoch in range(total_epochs):
         model.train()
-        epoch_loss = 0
 
-        loop = tqdm(train_loader, desc=f"Epoch [{epoch + 1}/{total_epochs}]", leave=True)
+        # === Multi-Scale: Random size mỗi epoch ===
+        if epoch >= warmup_epochs:
+            current_size = random.choice(multi_scales)
+        else:
+            current_size = args.image_size  # Warmup luôn dùng size chuẩn
+
+        # === Close Mosaic Strategy ===
+        if epoch + 1 > close_mosaic_epoch:
+            train_dataset.mosaic_prob = 0.0
+            current_size = args.image_size  # Fix size khi fine-tune
+            if epoch + 1 == close_mosaic_epoch + 1:
+                print(f"\n[!] Close Mosaic: Tắt Mosaic từ epoch {epoch + 1} — fine-tune trên ảnh clean\n")
+        else:
+            train_dataset.mosaic_prob = 0.7
+
+        # Cập nhật image_size cho dataset và loss
+        train_dataset.base.image_size = current_size
+        train_dataset.base.transform = get_train_transform(image_size=current_size)
+        criterion.image_size = current_size
+
+        # Tạo DataLoader mới để workers thấy thay đổi
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=4,
+            pin_memory=True,
+            prefetch_factor=2
+        )
+
+        epoch_loss = 0
+        loop = tqdm(train_loader, desc=f"Epoch [{epoch + 1}/{total_epochs}] (size={current_size})", leave=True)
         for images, tgt_s, tgt_m, tgt_l in loop:
             images = images.to(device)
             tgt_s = tgt_s.to(device)
@@ -161,7 +193,7 @@ def train(args):
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # giảm từ 10 → 1.0
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -175,10 +207,13 @@ def train(args):
         scheduler.step()
 
         current_lr = optimizer.param_groups[1]['lr']  # head LR
-        print(f"-> Trung bình Loss Epoch {epoch + 1}: {avg_loss:.4f} | LR: {current_lr:.6f}")
+        print(f"-> Trung bình Loss Epoch {epoch + 1}: {avg_loss:.4f} | LR: {current_lr:.6f} | Size: {current_size}")
 
         # === Evaluation với EMA weights ===
         ema.apply_shadow(model)
+
+        # Evaluation luôn dùng size chuẩn (640) để kết quả nhất quán
+        criterion.image_size = args.image_size
 
         if (epoch + 1) % args.eval_interval == 0 or epoch == total_epochs - 1:
             print(f"Đang đánh giá mAP trên tập Validation (có thể mất vài phút)...")

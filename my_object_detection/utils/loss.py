@@ -24,10 +24,10 @@ class YoloLoss(nn.Module):
 
         self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
 
-        # Hệ số loss (YOLOv5-style)
-        self.lambda_coord = 5.0
-        self.lambda_obj   = 1.0   # Hệ số objectness (applied to total_obj_loss)
-        self.lambda_cls   = 1.0
+        # Hệ số loss (tuned cho 5-class dataset)
+        self.lambda_coord = 7.5   # Tăng từ 5.0 → push box accuracy (CIoU)
+        self.lambda_obj   = 1.0   # Hệ số objectness (balance đã xử lý per-scale)
+        self.lambda_cls   = 0.5   # Giảm từ 1.0 → Focal Loss đã tự cân bằng, 5 class không cần push mạnh
 
         # Focal Loss
         self.focal_alpha = 0.25

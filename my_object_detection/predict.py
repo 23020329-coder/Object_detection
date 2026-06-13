@@ -1,6 +1,7 @@
 """
-Inference script cho YOLOv3-style Multi-Scale Detector.
+Inference script cho YOLOv5-style Multi-Scale Detector + TTA.
 Decode predictions từ 3 scales, áp dụng batched NMS, xuất predictions.json.
+Hỗ trợ Test-Time Augmentation (TTA): flip ngang + merge boxes.
 """
 import os
 import json
@@ -16,20 +17,21 @@ from utils.anchors import get_anchors, STRIDES
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Suy luận YOLOv3-style Detector")
+    parser = argparse.ArgumentParser(description="Suy luận YOLOv5-style Detector")
     parser.add_argument("--image_dir", type=str, required=True, help="Đường dẫn đến thư mục ảnh cần dự đoán")
     parser.add_argument("--output", type=str, required=True, help="Đường dẫn file predictions.json")
     parser.add_argument("--checkpoint", type=str, default="./models/best.pth", help="Đường dẫn file mô hình .pth")
-    parser.add_argument("--conf_thresh", type=float, default=0.15, help="Ngưỡng độ tin cậy")
-    parser.add_argument("--iou_thresh", type=float, default=0.4, help="Ngưỡng NMS")
+    parser.add_argument("--conf_thresh", type=float, default=0.001, help="Ngưỡng độ tin cậy")
+    parser.add_argument("--iou_thresh", type=float, default=0.6, help="Ngưỡng NMS")
     parser.add_argument("--image_size", type=int, default=640, help="Kích thước ảnh")
+    parser.add_argument("--tta", action="store_true", help="Bật Test-Time Augmentation (flip ngang)")
     parser.add_argument("--classes_json", type=str, default=None,
                         help="Đường dẫn JSON chứa classes (nếu không cung cấp, dùng mặc định)")
     return parser.parse_args()
 
 
-def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou_threshold=0.4):
-    """Predict trên 1 ảnh, decode multi-scale, áp dụng batched NMS."""
+def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou_threshold=0.4, use_tta=False):
+    """Predict trên 1 ảnh, decode multi-scale, áp dụng batched NMS. Hỗ trợ TTA."""
     model.eval()
     C = model.C
 
@@ -48,8 +50,19 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou
     with torch.no_grad():
         outputs = model(img_tensor)
 
-    # Decode từ 3 scales — sử dụng hàm chung từ metrics.py
+    # Decode từ 3 scales
     boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
+
+    # === TTA: Horizontal Flip ===
+    if use_tta:
+        img_flip = img_tensor.flip(-1)  # Lật ngang (flip chiều W)
+        with torch.no_grad():
+            outputs_flip = model(img_flip)
+        boxes_flip = decode_multi_scale(outputs_flip, image_size, C, conf_threshold=threshold)
+
+        # Flip lại tọa độ x: x_new = image_size - x_old
+        for x1, y1, x2, y2, score, cls_idx in boxes_flip:
+            boxes.append((image_size - x2, y1, image_size - x1, y2, score, cls_idx))
 
     if len(boxes) == 0:
         return original_img, []
@@ -77,7 +90,7 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou
 
 
 def generate_predictions_json(model, image_dir, output_json, classes, device,
-                              image_size, threshold, iou_threshold):
+                              image_size, threshold, iou_threshold, use_tta=False):
     """Chạy inference trên toàn bộ thư mục ảnh, xuất predictions.json."""
     predictions = []
 
@@ -88,7 +101,9 @@ def generate_predictions_json(model, image_dir, output_json, classes, device,
 
     for filename in image_files:
         img_path = os.path.join(image_dir, filename)
-        _, final_boxes = predict_image(model, img_path, device, image_size, threshold, iou_threshold)
+        _, final_boxes = predict_image(
+            model, img_path, device, image_size, threshold, iou_threshold, use_tta=use_tta
+        )
 
         boxes_list = []
         for x1, y1, x2, y2, conf, cls_idx in final_boxes:
@@ -132,6 +147,10 @@ if __name__ == '__main__':
     else:
         print(f"Cảnh báo: Chưa tìm thấy mô hình tại {args.checkpoint}.")
 
+    tta_status = "BẬT" if args.tta else "TẮT"
+    print(f"TTA (Test-Time Augmentation): {tta_status}")
+    print(f"Confidence threshold: {args.conf_thresh} | NMS IoU threshold: {args.iou_thresh}")
+
     generate_predictions_json(
         model=model,
         image_dir=args.image_dir,
@@ -140,5 +159,6 @@ if __name__ == '__main__':
         device=device,
         image_size=args.image_size,
         threshold=args.conf_thresh,
-        iou_threshold=args.iou_thresh
+        iou_threshold=args.iou_thresh,
+        use_tta=args.tta
     )

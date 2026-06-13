@@ -219,7 +219,7 @@ def decode_multi_scale(model_outputs, image_size, C, conf_threshold=0.15):
     return all_boxes
 
 
-def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, iou_threshold=0.4):
+def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, iou_threshold=0.4, use_tta=False):
     """Predict trên 1 ảnh, decode multi-scale, áp dụng NMS."""
     device = next(model.parameters()).device
     model.eval()
@@ -242,6 +242,15 @@ def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, io
 
     # Decode từ 3 scales
     boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
+
+    # === TTA: Horizontal Flip ===
+    if use_tta:
+        img_flip = img_tensor.flip(-1)
+        with torch.no_grad():
+            outputs_flip = model(img_flip)
+        boxes_flip = decode_multi_scale(outputs_flip, image_size, C, conf_threshold=threshold)
+        for x1, y1, x2, y2, score, cls_idx in boxes_flip:
+            boxes.append((image_size - x2, y1, image_size - x1, y2, score, cls_idx))
 
     if len(boxes) == 0:
         return original_img, []
@@ -269,7 +278,8 @@ def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, io
 
 
 def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
-                                threshold=0.15, iou_threshold=0.4, max_detections_per_image=100):
+                                threshold=0.15, iou_threshold=0.4, max_detections_per_image=100,
+                                use_tta=False):
     with open(gt_json_path, "r", encoding="utf-8") as file:
         ground_truth = json.load(file)
 
@@ -284,6 +294,7 @@ def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
             image_size=image_size,
             threshold=threshold,
             iou_threshold=iou_threshold,
+            use_tta=use_tta,
         )
 
         boxes = sorted(boxes, key=lambda item: item[4], reverse=True)[:max_detections_per_image]
@@ -305,7 +316,8 @@ def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
 
 def evaluate_model_map(model, gt_json_path, image_dir, image_size=640,
                        threshold=0.15, iou_threshold=0.5,
-                       max_detections_per_image=100, output_path=None):
+                       max_detections_per_image=100, output_path=None,
+                       use_tta=False):
     ground_truth, predictions = build_predictions_for_split(
         model=model,
         gt_json_path=gt_json_path,
@@ -314,6 +326,7 @@ def evaluate_model_map(model, gt_json_path, image_dir, image_size=640,
         threshold=threshold,
         iou_threshold=iou_threshold,
         max_detections_per_image=max_detections_per_image,
+        use_tta=use_tta,
     )
 
     result = evaluate_map50(
