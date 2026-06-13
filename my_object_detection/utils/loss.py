@@ -83,17 +83,13 @@ class YoloLoss(nn.Module):
                 total_cls_loss = total_cls_loss + cls_loss
 
             # --- Objectness Loss ---
-            # .mean() cho CẢ pos lẫn neg → cân bằng gradient giữa 3 scales
-            # P3(19200 cells), P4(4800), P5(1200) đều đóng góp BẰNG NHAU
+            # YOLOv5-style: tính .mean() trên TOÀN BỘ grid (cả pos và neg)
+            # Tránh chia tách pos/neg vì dùng .mean() riêng sẽ gây mất cân bằng gradient cực lớn.
+            # Hệ số balance cho 3 scales (P3 nhiều cell nhất -> weight cao nhất)
             obj_loss_map = self.bce_obj(pred[..., 4], obj_target)
-
-            if obj_mask.any():
-                pos_obj = obj_loss_map[obj_mask].mean()
-            else:
-                pos_obj = torch.tensor(0.0, device=device)
-            neg_obj = obj_loss_map[noobj_mask].mean()
-
-            obj_loss = self.lambda_obj * pos_obj + self.lambda_noobj * neg_obj
+            balance = [4.0, 1.0, 0.4]
+            obj_loss = obj_loss_map.mean() * balance[scale_idx]
+            
             total_obj_loss = total_obj_loss + obj_loss
 
         # === Final Loss ===

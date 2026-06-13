@@ -187,8 +187,8 @@ def train(args):
                 gt_json_path=args.val_data,
                 image_dir=args.val_image_dir,
                 image_size=args.image_size,
-                threshold=0.15,
-                iou_threshold=0.5
+                threshold=0.001,
+                iou_threshold=0.6
             )
             epoch_map = val_result["mAP@0.5"]
             print(f"-> mAP@0.5 Epoch {epoch + 1}: {epoch_map:.4f}")
