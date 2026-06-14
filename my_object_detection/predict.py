@@ -27,6 +27,8 @@ def parse_args():
     parser.add_argument("--wbf", action="store_true", help="Use WBF instead of fast batched NMS")
     parser.add_argument("--max_candidates", type=int, default=300, help="Max boxes before NMS/WBF per image")
     parser.add_argument("--max_detections", type=int, default=100, help="Max boxes written per image")
+    parser.add_argument("--class_conf", type=str, default="", help="Class-specific conf, e.g. chair:0.015,person:0.003")
+    parser.add_argument("--class_nms", type=str, default="", help="Class-specific NMS IoU, e.g. chair:0.45")
     parser.add_argument("--classes_json", type=str, default=None, help="Optional JSON file containing classes")
     return parser.parse_args()
 
@@ -66,9 +68,48 @@ def boxes_to_wbf_inputs(boxes, image_size):
     return boxes_norm, scores, labels
 
 
-def run_fast_nms(boxes, device, iou_threshold, max_detections):
+def parse_class_values(spec, classes):
+    values = {}
+    if not spec:
+        return values
+
+    class_to_idx = {name: idx for idx, name in enumerate(classes)}
+    for chunk in spec.split(","):
+        if not chunk.strip():
+            continue
+        name, value = chunk.split(":", 1)
+        name = name.strip()
+        if name not in class_to_idx:
+            raise ValueError(f"Unknown class in class-specific setting: {name}")
+        values[class_to_idx[name]] = float(value)
+    return values
+
+
+def filter_by_class_conf(boxes, default_threshold, class_conf):
+    if not class_conf:
+        return boxes
+    return [
+        box for box in boxes
+        if box[4] >= class_conf.get(int(box[5]), default_threshold)
+    ]
+
+
+def run_fast_nms(boxes, device, iou_threshold, max_detections, class_nms=None):
     if not boxes:
         return []
+
+    if class_nms:
+        kept = []
+        for cls_idx in sorted({int(box[5]) for box in boxes}):
+            cls_boxes = [box for box in boxes if int(box[5]) == cls_idx]
+            kept.extend(run_fast_nms(
+                cls_boxes,
+                device,
+                class_nms.get(cls_idx, iou_threshold),
+                max_detections,
+                class_nms=None,
+            ))
+        return sorted(kept, key=lambda item: item[4], reverse=True)[:max_detections]
 
     box_tensor = torch.tensor([[b[0], b[1], b[2], b[3]] for b in boxes], dtype=torch.float32, device=device)
     score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32, device=device)
@@ -110,16 +151,18 @@ def run_wbf(boxes, image_size, iou_threshold, score_threshold, max_detections):
 
 
 def predict_image(model, image_path, device, image_size=640, threshold=0.01, iou_threshold=0.6,
-                  use_tta=False, use_wbf=False, max_candidates=300, max_detections=100):
+                  use_tta=False, use_wbf=False, max_candidates=300, max_detections=100,
+                  class_conf=None, class_nms=None):
     model.eval()
     num_classes = model.C
     original_img, img_tensor, orig_w, orig_h = preprocess_image(image_path, image_size, device)
+    decode_threshold = min([threshold] + list((class_conf or {}).values()))
 
     with torch.inference_mode():
         outputs = model(img_tensor)
 
     boxes = topk_boxes(
-        decode_multi_scale(outputs, image_size, num_classes, conf_threshold=threshold),
+        decode_multi_scale(outputs, image_size, num_classes, conf_threshold=decode_threshold),
         max_candidates,
     )
 
@@ -127,7 +170,7 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.01, iou
         with torch.inference_mode():
             outputs_flip = model(img_tensor.flip(-1))
         flip_boxes = topk_boxes(
-            decode_multi_scale(outputs_flip, image_size, num_classes, conf_threshold=threshold),
+            decode_multi_scale(outputs_flip, image_size, num_classes, conf_threshold=decode_threshold),
             max_candidates,
         )
         boxes.extend([
@@ -135,11 +178,12 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.01, iou
             for b in flip_boxes
         ])
 
+    boxes = filter_by_class_conf(boxes, threshold, class_conf or {})
     boxes = topk_boxes(boxes, max_candidates)
     if use_wbf:
         final_boxes = run_wbf(boxes, image_size, iou_threshold, threshold, max_detections)
     else:
-        final_boxes = run_fast_nms(boxes, device, iou_threshold, max_detections)
+        final_boxes = run_fast_nms(boxes, device, iou_threshold, max_detections, class_nms=class_nms or {})
 
     scaled_boxes = []
     for x1, y1, x2, y2, score, cls_idx in sorted(final_boxes, key=lambda item: item[4], reverse=True)[:max_detections]:
@@ -157,7 +201,8 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.01, iou
 
 def generate_predictions_json(model, image_dir, output_json, classes, device,
                               image_size, threshold, iou_threshold, use_tta=False,
-                              use_wbf=False, max_candidates=300, max_detections=100):
+                              use_wbf=False, max_candidates=300, max_detections=100,
+                              class_conf=None, class_nms=None):
     image_files = sorted([
         file_name for file_name in os.listdir(image_dir)
         if file_name.lower().endswith((".png", ".jpg", ".jpeg"))
@@ -178,6 +223,8 @@ def generate_predictions_json(model, image_dir, output_json, classes, device,
             use_wbf=use_wbf,
             max_candidates=max_candidates,
             max_detections=max_detections,
+            class_conf=class_conf,
+            class_nms=class_nms,
         )
 
         predictions.append({
@@ -213,6 +260,8 @@ if __name__ == "__main__":
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     classes = load_classes(args.classes_json)
+    class_conf = parse_class_values(args.class_conf, classes)
+    class_nms = parse_class_values(args.class_nms, classes)
     print(f"Classes: {classes}")
     print(f"Device: {device}")
 
@@ -227,6 +276,10 @@ if __name__ == "__main__":
         f"conf={args.conf_thresh} | iou={args.iou_thresh} | "
         f"tta={args.tta} | wbf={args.wbf} | max_candidates={args.max_candidates}"
     )
+    if class_conf:
+        print(f"Class conf overrides: {class_conf}")
+    if class_nms:
+        print(f"Class NMS overrides: {class_nms}")
 
     generate_predictions_json(
         model=model,
@@ -241,4 +294,6 @@ if __name__ == "__main__":
         use_wbf=args.wbf,
         max_candidates=args.max_candidates,
         max_detections=args.max_detections,
+        class_conf=class_conf,
+        class_nms=class_nms,
     )

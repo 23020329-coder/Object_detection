@@ -26,6 +26,7 @@ NUM_ANCHORS_PER_SCALE = 3
 
 # Ngưỡng IoU tối thiểu để gán GT vào anchor (Multi-Anchor Assignment)
 MULTI_ANCHOR_IOU_THRESH = 0.25
+IGNORE_ANCHOR_IOU_THRESH = 0.15
 
 
 def get_anchors():
@@ -92,3 +93,15 @@ def find_matching_anchors(gt_w, gt_h, iou_thresh=MULTI_ANCHOR_IOU_THRESH):
 
     # Luon giu lai best anchor de moi GT co it nhat mot positive target.
     return candidates[:1]
+
+
+def find_anchor_candidates(gt_w, gt_h):
+    """Return all anchors sorted by width/height IoU descending."""
+    candidates = []
+    for scale_idx, scale_anchors in enumerate(ANCHORS):
+        for anchor_idx, (aw, ah) in enumerate(scale_anchors):
+            iou = anchor_wh_iou((aw, ah), (gt_w, gt_h))
+            candidates.append((iou, scale_idx, anchor_idx))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates

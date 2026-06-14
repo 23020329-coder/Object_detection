@@ -24,7 +24,8 @@ from torch.utils.data import Dataset
 
 from utils.anchors import (
     ANCHORS, STRIDES, NUM_ANCHORS_PER_SCALE,
-    find_matching_anchors, MULTI_ANCHOR_IOU_THRESH
+    find_anchor_candidates, find_matching_anchors,
+    IGNORE_ANCHOR_IOU_THRESH, MULTI_ANCHOR_IOU_THRESH
 )
 
 
@@ -101,7 +102,20 @@ class ObjectDetectionDataset(Dataset):
 
             # Bật lại Multi-Anchor Assignment (YOLOv5-style)
             # Không dùng `if idx_c > 0: break` nữa để tăng 3x lượng positive samples
+            all_candidates = find_anchor_candidates(w, h)
             candidates = find_matching_anchors(w, h, MULTI_ANCHOR_IOU_THRESH)
+            positive_keys = {(scale_idx, anchor_idx) for _, scale_idx, anchor_idx in candidates}
+
+            for iou_val, scale_idx, anchor_idx in all_candidates:
+                if iou_val < IGNORE_ANCHOR_IOU_THRESH or (scale_idx, anchor_idx) in positive_keys:
+                    continue
+
+                stride = self.strides[scale_idx]
+                S = self.image_size // stride
+                gj = min(int(cx / stride), S - 1)
+                gi = min(int(cy / stride), S - 1)
+                if targets[scale_idx][gi, gj, anchor_idx, 4] == 0:
+                    targets[scale_idx][gi, gj, anchor_idx, 4] = -1.0
 
             for idx_c, (iou_val, scale_idx, anchor_idx) in enumerate(candidates):
 
@@ -135,7 +149,7 @@ class ObjectDetectionDataset(Dataset):
                     cells.append((gi + 1, gj))
 
                 for ci, cj in cells:
-                    if targets[scale_idx][ci, cj, anchor_idx, 4] == 0:
+                    if targets[scale_idx][ci, cj, anchor_idx, 4] != 1:
                         # Raw offset từ cell hiện tại (có thể < 0 hoặc > 1 cho neighbors)
                         tx = gx - cj
                         ty = gy - ci

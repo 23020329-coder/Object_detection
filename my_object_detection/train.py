@@ -9,7 +9,7 @@ import argparse
 import copy
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicDataset, get_train_transform
@@ -65,7 +65,18 @@ def parse_args():
     parser.add_argument("--conf_threshold", type=float, default=0.01, help="Validation confidence threshold")
     parser.add_argument("--nms_iou_threshold", type=float, default=0.5, help="Validation NMS IoU threshold")
     parser.add_argument("--map_iou_threshold", type=float, default=0.5, help="Validation mAP IoU threshold")
+    parser.add_argument("--chair_oversample", type=float, default=1.5, help="Sampling weight for images containing chair")
     return parser.parse_args()
+
+
+def build_class_oversample_weights(images_info, img_to_anns, target_class="chair", target_weight=1.5):
+    weights = []
+    target_weight = max(float(target_weight), 1.0)
+    for img_info in images_info:
+        anns = img_to_anns[img_info['id']]
+        has_target = any(ann['class'] == target_class for ann in anns)
+        weights.append(target_weight if has_target else 1.0)
+    return torch.as_tensor(weights, dtype=torch.double)
 
 
 def train(args):
@@ -115,6 +126,21 @@ def train(args):
     # OneCycleLR kích xung lực mạnh
     total_epochs = args.epochs
     warmup_epochs = args.warmup_epochs
+    sample_weights = build_class_oversample_weights(
+        images_info,
+        train_anns,
+        target_class="chair",
+        target_weight=args.chair_oversample,
+    )
+    train_sampler = None
+    if args.chair_oversample > 1.0:
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        print(f"Chair oversampling: {args.chair_oversample:.2f}x")
+
     steps_per_epoch = math.ceil(len(train_dataset) / args.batch_size)
     
     scheduler = optim.lr_scheduler.OneCycleLR(
@@ -149,7 +175,8 @@ def train(args):
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=4,
         pin_memory=True,
         prefetch_factor=2

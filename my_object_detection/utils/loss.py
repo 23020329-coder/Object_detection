@@ -46,12 +46,12 @@ class YoloLoss(nn.Module):
         self.strides = STRIDES
         self.anchors = get_anchor_tensors()
 
-        self.bce_obj = CustomFocalLoss(alpha=0.25, gamma=2.0)
+        self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
 
         # Thêm pos_weight cho cls: chair (index 4) khó nhất
         cls_pos_weight = torch.ones(C)
-        cls_pos_weight[-1] = 2.5  # chair
-        self.bce_cls = CustomFocalLoss(alpha=0.25, gamma=2.0, pos_weight=cls_pos_weight)
+        cls_pos_weight[-1] = 1.75  # chair
+        self.bce_cls = nn.BCEWithLogitsLoss(pos_weight=cls_pos_weight, reduction='none')
 
         # Cứu class Chair bằng cách tăng hệ số phạt obj để tránh nhận nhầm background
         self.lambda_coord = 7.5
@@ -73,14 +73,14 @@ class YoloLoss(nn.Module):
             anchors = self.anchors[scale_idx].to(device)
             stride  = self.strides[scale_idx]
 
-            obj_mask   = tgt[..., 4] == 1.0
-            noobj_mask = tgt[..., 4] == 0.0
+            obj_mask = tgt[..., 4] == 1.0
+            valid_obj_mask = tgt[..., 4] >= 0.0
 
             num_pos = obj_mask.sum().item()
             num_total_pos += num_pos
 
             # === Objectness target (IoU-aware nếu có positives) ===
-            obj_target = tgt[..., 4].clone()
+            obj_target = tgt[..., 4].clamp(min=0.0)
 
             if num_pos > 0:
                 # --- Box Regression (CIoU) ---
@@ -109,7 +109,10 @@ class YoloLoss(nn.Module):
             # Focal Loss tự động đè bẹp False Positives
             obj_loss_map = self.bce_obj(pred[..., 4], obj_target)
             balance = [4.0, 1.0, 0.4]
-            obj_loss = obj_loss_map.mean() * balance[scale_idx]
+            if valid_obj_mask.any():
+                obj_loss = obj_loss_map[valid_obj_mask].mean() * balance[scale_idx]
+            else:
+                obj_loss = obj_loss_map.sum() * 0.0
             
             total_obj_loss = total_obj_loss + obj_loss
 
