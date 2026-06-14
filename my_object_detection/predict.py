@@ -12,7 +12,7 @@ import numpy as np
 import torchvision.ops as ops
 
 from model_arch import YoloResNet
-from utils.metrics import decode_multi_scale
+from utils.metrics import decode_multi_scale, batched_weighted_nms
 from utils.anchors import get_anchors, STRIDES
 
 
@@ -72,8 +72,7 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou
     score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32)
     class_tensor = torch.tensor([b[5] for b in boxes], dtype=torch.int64)
 
-    keep_idx = ops.batched_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
-    final_boxes = [boxes[i] for i in keep_idx.tolist()]
+    final_boxes = batched_weighted_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
 
     # Scale boxes về tọa độ ảnh gốc
     scaled_boxes = []
