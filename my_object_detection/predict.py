@@ -10,6 +10,7 @@ import torch
 import cv2
 import numpy as np
 import torchvision.ops as ops
+from ensemble_boxes import weighted_boxes_fusion
 
 from model_arch import YoloResNet
 from utils.metrics import decode_multi_scale, batched_weighted_nms
@@ -50,38 +51,57 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou
     with torch.no_grad():
         outputs = model(img_tensor)
 
-    # Decode từ 3 scales
-    boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
+    # Decode từ 3 scales - Coi như Model 1
+    boxes_list = []
+    scores_list = []
+    labels_list = []
 
-    # === TTA: Horizontal Flip ===
+    orig_boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
+    if len(orig_boxes) > 0:
+        b_list = [[max(0.0, min(1.0, b[0]/image_size)), max(0.0, min(1.0, b[1]/image_size)), 
+                   max(0.0, min(1.0, b[2]/image_size)), max(0.0, min(1.0, b[3]/image_size))] for b in orig_boxes]
+        s_list = [b[4] for b in orig_boxes]
+        l_list = [int(b[5]) for b in orig_boxes]
+        boxes_list.append(b_list)
+        scores_list.append(s_list)
+        labels_list.append(l_list)
+
+    # === TTA: Horizontal Flip === Coi như Model 2
     if use_tta:
-        img_flip = img_tensor.flip(-1)  # Lật ngang (flip chiều W)
+        img_flip = img_tensor.flip(-1)
         with torch.no_grad():
             outputs_flip = model(img_flip)
-        boxes_flip = decode_multi_scale(outputs_flip, image_size, C, conf_threshold=threshold)
+        flip_boxes = decode_multi_scale(outputs_flip, image_size, C, conf_threshold=threshold)
+        if len(flip_boxes) > 0:
+            b_list_flip = [[max(0.0, min(1.0, (image_size - b[2])/image_size)), max(0.0, min(1.0, b[1]/image_size)), 
+                            max(0.0, min(1.0, (image_size - b[0])/image_size)), max(0.0, min(1.0, b[3]/image_size))] for b in flip_boxes]
+            s_list_flip = [b[4] for b in flip_boxes]
+            l_list_flip = [int(b[5]) for b in flip_boxes]
+            boxes_list.append(b_list_flip)
+            scores_list.append(s_list_flip)
+            labels_list.append(l_list_flip)
 
-        # Flip lại tọa độ x: x_new = image_size - x_old
-        for x1, y1, x2, y2, score, cls_idx in boxes_flip:
-            boxes.append((image_size - x2, y1, image_size - x1, y2, score, cls_idx))
-
-    if len(boxes) == 0:
+    if len(boxes_list) == 0:
         return original_img, []
 
-    # Batched NMS (NMS riêng cho từng class)
-    box_tensor = torch.tensor([[b[0], b[1], b[2], b[3]] for b in boxes], dtype=torch.float32)
-    score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32)
-    class_tensor = torch.tensor([b[5] for b in boxes], dtype=torch.int64)
-
-    final_boxes = batched_weighted_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
+    # Sử dụng thư viện ensemble_boxes WBF
+    boxes_res, scores_res, labels_res = weighted_boxes_fusion(
+        boxes_list, scores_list, labels_list, 
+        weights=None, iou_thr=iou_threshold, skip_box_thr=0.0
+    )
 
     # Scale boxes về tọa độ ảnh gốc
     scaled_boxes = []
-    for x1, y1, x2, y2, score, cls_idx in final_boxes:
+    for i in range(len(boxes_res)):
+        x1, y1, x2, y2 = boxes_res[i]
+        score = float(scores_res[i])
+        cls_idx = int(labels_res[i])
+        
         scaled_boxes.append((
-            x1 * orig_w / image_size,
-            y1 * orig_h / image_size,
-            x2 * orig_w / image_size,
-            y2 * orig_h / image_size,
+            x1 * orig_w,
+            y1 * orig_h,
+            x2 * orig_w,
+            y2 * orig_h,
             score, cls_idx
         ))
 
