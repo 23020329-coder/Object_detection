@@ -98,12 +98,20 @@ def predict_image(model, image_path, device, image_size=640, threshold=0.15, iou
         score = float(scores_res[i])
         cls_idx = int(labels_res[i])
         
+        # Đảm bảo box tuyệt đối nằm trong [0, 1] trước khi nhân
+        x1 = max(0.0, min(1.0, float(x1)))
+        y1 = max(0.0, min(1.0, float(y1)))
+        x2 = max(0.0, min(1.0, float(x2)))
+        y2 = max(0.0, min(1.0, float(y2)))
+        
+        # Nhân với kích thước thật và cắt phần dư thừa nhỏ xíu do sai số float
+        x1_s = max(0.0, min(x1 * orig_w, orig_w - 0.001))
+        y1_s = max(0.0, min(y1 * orig_h, orig_h - 0.001))
+        x2_s = max(0.0, min(x2 * orig_w, orig_w - 0.001))
+        y2_s = max(0.0, min(y2 * orig_h, orig_h - 0.001))
+        
         scaled_boxes.append((
-            x1 * orig_w,
-            y1 * orig_h,
-            x2 * orig_w,
-            y2 * orig_h,
-            score, cls_idx
+            x1_s, y1_s, x2_s, y2_s, score, cls_idx
         ))
 
     return original_img, scaled_boxes
