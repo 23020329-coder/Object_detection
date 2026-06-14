@@ -12,11 +12,6 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import cv2
-
-# Fix CPU Bottleneck (Thread Contention) trên Kaggle
-cv2.setNumThreads(0)
-cv2.ocl.setUseOpenCL(False)
 
 from utils.dataset import parse_annotations, ObjectDetectionDataset, MosaicDataset, get_train_transform
 from utils.loss import YoloLoss
@@ -176,7 +171,7 @@ def train(args):
             train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
-            num_workers=2,  # Giảm từ 4 xuống 2 để giảm tải CPU Kaggle
+            num_workers=4,
             pin_memory=True,
             prefetch_factor=2
         )
