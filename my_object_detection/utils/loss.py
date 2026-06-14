@@ -22,7 +22,7 @@ class YoloLoss(nn.Module):
         self.strides = STRIDES
         self.anchors = get_anchor_tensors()
 
-        # self.bce_obj = nn.BCEWithLogitsLoss(reduction='none') # Replaced by Focal Loss
+        self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
 
         # Hệ số loss (tuned cho 5-class dataset)
         self.lambda_coord = 7.5   # Tăng từ 5.0 → push box accuracy (CIoU)
@@ -85,12 +85,7 @@ class YoloLoss(nn.Module):
             # YOLOv5-style: tính .mean() trên TOÀN BỘ grid (cả pos và neg)
             # Tránh chia tách pos/neg vì dùng .mean() riêng sẽ gây mất cân bằng gradient cực lớn.
             # Hệ số balance cho 3 scales (P3 nhiều cell nhất -> weight cao nhất)
-            # Dùng Focal Loss để đàn áp triệt để Background (hạn chế False Positives)
-            obj_loss_map = ops.sigmoid_focal_loss(
-                pred[..., 4], obj_target,
-                alpha=self.focal_alpha, gamma=self.focal_gamma,
-                reduction='none'
-            )
+            obj_loss_map = self.bce_obj(pred[..., 4], obj_target)
             balance = [4.0, 1.0, 0.4]
             obj_loss = obj_loss_map.mean() * balance[scale_idx]
             

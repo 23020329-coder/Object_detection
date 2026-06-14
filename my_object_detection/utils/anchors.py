@@ -85,7 +85,4 @@ def find_matching_anchors(gt_w, gt_h, iou_thresh=MULTI_ANCHOR_IOU_THRESH):
 
     # Sắp xếp theo IoU giảm dần
     candidates.sort(key=lambda x: x[0], reverse=True)
-    
-    # [THAY ĐỔI Ở ĐÂY]: CHỈ LẤY TOP-1 ANCHOR TỐT NHẤT 
-    # Bỏ qua hoàn toàn iou_thresh để tránh Target Explosion
-    return [candidates[0]]
+    return candidates
