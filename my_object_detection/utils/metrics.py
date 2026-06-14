@@ -151,6 +151,66 @@ def evaluate_map50(ground_truth, predictions, classes, iou_threshold=0.5):
     }
 
 
+def batched_weighted_nms(boxes, scores, classes, iou_threshold=0.5):
+    """
+    Weighted Boxes Fusion (WBF) thay thế cho NMS.
+    Gộp các box đè nhau thay vì xóa, giúp làm mượt tọa độ và triệt tiêu nhiễu.
+    """
+    if len(boxes) == 0:
+        return []
+    
+    max_coordinate = boxes.max() if len(boxes) > 0 else 0
+    offsets = classes.to(boxes.dtype) * (max_coordinate + torch.tensor(1.0, device=boxes.device))
+    boxes_offset = boxes + offsets[:, None]
+    
+    sorted_idx = torch.argsort(scores, descending=True)
+    boxes_offset = boxes_offset[sorted_idx]
+    original_boxes = boxes[sorted_idx]
+    scores = scores[sorted_idx]
+    original_classes = classes[sorted_idx]
+    
+    clusters = []
+    cluster_boxes = []
+    
+    for i in range(len(boxes_offset)):
+        box = boxes_offset[i]
+        best_iou = 0.0
+        best_c_idx = -1
+        
+        for c_idx, c_box in enumerate(cluster_boxes):
+            iou = ops.box_iou(box.unsqueeze(0), c_box.unsqueeze(0)).item()
+            if iou > best_iou:
+                best_iou = iou
+                best_c_idx = c_idx
+                
+        if best_iou > iou_threshold:
+            clusters[best_c_idx].append(i)
+            c_indices = clusters[best_c_idx]
+            c_boxes_tensor = boxes_offset[c_indices]
+            c_scores_tensor = scores[c_indices].unsqueeze(1)
+            new_merged = (c_boxes_tensor * c_scores_tensor).sum(dim=0) / c_scores_tensor.sum()
+            cluster_boxes[best_c_idx] = new_merged
+        else:
+            clusters.append([i])
+            cluster_boxes.append(box)
+            
+    final_boxes = []
+    for c_indices in clusters:
+        c_boxes_tensor = original_boxes[c_indices]
+        c_scores_tensor = scores[c_indices].unsqueeze(1)
+        merged_box = (c_boxes_tensor * c_scores_tensor).sum(dim=0) / c_scores_tensor.sum()
+        merged_score = scores[c_indices].max()
+        cls_idx = original_classes[c_indices[0]]
+        
+        final_boxes.append((
+            merged_box[0].item(), merged_box[1].item(), 
+            merged_box[2].item(), merged_box[3].item(), 
+            merged_score.item(), cls_idx.item()
+        ))
+        
+    return final_boxes
+
+
 def decode_multi_scale(model_outputs, image_size, C, conf_threshold=0.15):
     """
     Decode raw model outputs từ 3 scales thành danh sách boxes.

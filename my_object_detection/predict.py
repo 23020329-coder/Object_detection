@@ -13,7 +13,7 @@ import torchvision.ops as ops
 from ensemble_boxes import weighted_boxes_fusion
 
 from model_arch import YoloResNet
-from utils.metrics import decode_multi_scale
+from utils.metrics import decode_multi_scale, batched_weighted_nms
 from utils.anchors import get_anchors, STRIDES
 
 
