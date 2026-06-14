@@ -9,13 +9,10 @@ import argparse
 import torch
 import cv2
 import numpy as np
-import torch
-import torchvision.ops as ops
 from ensemble_boxes import weighted_boxes_fusion
 
 from model_arch import YoloResNet
 from utils.metrics import decode_multi_scale
-from utils.anchors import get_anchors, STRIDES
 
 
 def parse_args():

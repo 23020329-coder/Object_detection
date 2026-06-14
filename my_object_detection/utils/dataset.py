@@ -99,13 +99,11 @@ class ObjectDetectionDataset(Dataset):
             if w <= 0 or h <= 0:
                 continue
 
-            # Tìm tất cả anchors phù hợp
+            # Bật lại Multi-Anchor Assignment (YOLOv5-style)
+            # Không dùng `if idx_c > 0: break` nữa để tăng 3x lượng positive samples
             candidates = find_matching_anchors(w, h, MULTI_ANCHOR_IOU_THRESH)
 
             for idx_c, (iou_val, scale_idx, anchor_idx) in enumerate(candidates):
-                # Luôn assign anchor tốt nhất (idx_c=0), + các anchor khác > threshold
-                if idx_c > 0 and iou_val < MULTI_ANCHOR_IOU_THRESH:
-                    break
 
                 stride = self.strides[scale_idx]
                 S = self.image_size // stride
@@ -179,18 +177,92 @@ class MosaicDataset(Dataset):
     - Epoch 36-50: Mosaic OFF (0%) → fine-tune trên ảnh clean
     """
 
-    def __init__(self, base_dataset, mosaic_prob=0.7):
+    def __init__(self, base_dataset, mosaic_prob=0.7, copy_paste_prob=0.0):
         self.base = base_dataset
         self.mosaic_prob = mosaic_prob
+        self.copy_paste_prob = copy_paste_prob
+        # Index riêng cho chair (class index 4)
+        self._build_chair_index()
 
     def __len__(self):
         return len(self.base)
 
+    def _build_chair_index(self):
+        """Cache danh sách ảnh có chứa chair để sample nhanh."""
+        self.chair_indices = []
+        chair_idx = self.base.class_to_idx.get('chair', 4)
+        for i, img_info in enumerate(self.base.images_info):
+            anns = self.base.img_to_anns[img_info['id']]
+            if any(self.base.class_to_idx[a['class']] == chair_idx for a in anns):
+                self.chair_indices.append(i)
+
     def __getitem__(self, idx):
         if random.random() < self.mosaic_prob:
-            return self._mosaic(idx)
+            result = self._mosaic(idx)
         else:
-            return self.base[idx]
+            result = self.base[idx]
+
+        # Copy-paste chair vào ảnh hiện tại
+        if self.copy_paste_prob > 0 and random.random() < self.copy_paste_prob and self.chair_indices:
+            result = self._copy_paste_chair(result)
+
+        return result
+
+    def _copy_paste_chair(self, original_result):
+        """Lấy chair crops từ ảnh khác, paste vào ảnh hiện tại."""
+        img_tensor, tgt_s, tgt_m, tgt_l = original_result
+        
+        # Chuyển tensor về numpy để xử lý
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+        std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+        img_np = ((img_tensor * std + mean) * 255).permute(1,2,0).byte().numpy()
+        
+        sz = self.base.image_size
+        new_bboxes, new_labels = [], []
+        
+        src_idx = random.choice(self.chair_indices)
+        src_img, src_bboxes, src_labels = self.base.load_raw(src_idx)
+        src_img = cv2.resize(src_img, (sz, sz))
+        src_h, src_w = src_img.shape[:2]
+        
+        chair_class_idx = self.base.class_to_idx.get('chair', 4)
+        
+        for bbox, label in zip(src_bboxes, src_labels):
+            if label != chair_class_idx:
+                continue
+            
+            xmin, ymin, xmax, ymax = [int(v) for v in bbox]
+            xmin = max(0, int(xmin / src_w * sz))
+            ymin = max(0, int(ymin / src_h * sz))
+            xmax = min(sz, int(xmax / src_w * sz))
+            ymax = min(sz, int(ymax / src_h * sz))
+            
+            if xmax - xmin < 16 or ymax - ymin < 16:
+                continue
+            
+            # Chọn vị trí paste ngẫu nhiên
+            pw = xmax - xmin
+            ph = ymax - ymin
+            px = random.randint(0, max(0, sz - pw))
+            py = random.randint(0, max(0, sz - ph))
+            
+            # Paste với alpha blend nhẹ để tự nhiên hơn
+            crop = src_img[ymin:ymax, xmin:xmax]
+            alpha = random.uniform(0.7, 1.0)
+            roi = img_np[py:py+ph, px:px+pw].astype(float)
+            img_np[py:py+ph, px:px+pw] = (alpha * crop + (1-alpha) * roi).astype(np.uint8)
+            
+            new_bboxes.append([px, py, px+pw, py+ph])
+            new_labels.append(chair_class_idx)
+        
+        if not new_bboxes:
+            return original_result
+        
+        # Re-normalize và rebuild targets
+        img_new = (img_np / 255.0 - np.array([0.485,0.456,0.406])) / np.array([0.229,0.224,0.225])
+        img_tensor_new = torch.tensor(img_new).permute(2,0,1).float()
+        
+        return self.base.create_label_matrix(img_tensor_new, new_bboxes, new_labels)
 
     def _mosaic(self, idx):
         """Mosaic: Ghép 4 ảnh thành 1 (YOLOv4-style)."""
@@ -243,6 +315,7 @@ class MosaicDataset(Dataset):
         mosaic_transform = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.3),
+            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.3),
             A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ToTensorV2(),
         ], bbox_params=A.BboxParams(

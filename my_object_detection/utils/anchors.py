@@ -85,4 +85,10 @@ def find_matching_anchors(gt_w, gt_h, iou_thresh=MULTI_ANCHOR_IOU_THRESH):
 
     # Sắp xếp theo IoU giảm dần
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates
+
+    matched = [item for item in candidates if item[0] >= iou_thresh]
+    if matched:
+        return matched
+
+    # Luon giu lai best anchor de moi GT co it nhat mot positive target.
+    return candidates[:1]

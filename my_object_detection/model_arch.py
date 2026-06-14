@@ -47,6 +47,53 @@ class SPPF(nn.Module):
         return self.cv2(torch.cat([x, y1, y2, y3], dim=1))
 
 
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes, ratio=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc1   = nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False)
+        self.relu1 = nn.ReLU()
+        self.fc2   = nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc2(self.relu1(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu1(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        padding = 3 if kernel_size == 7 else 1
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x_cat = torch.cat([avg_out, max_out], dim=1)
+        out = self.conv1(x_cat)
+        return self.sigmoid(out)
+
+class CBAM(nn.Module):
+    """
+    CBAM: Convolutional Block Attention Module.
+    Gắn vào để giúp mạng lọc nhiễu background và tập trung vào vật thể khó (như chair).
+    """
+    def __init__(self, in_planes, ratio=16, kernel_size=7):
+        super().__init__()
+        self.ca = ChannelAttention(in_planes, ratio)
+        self.sa = SpatialAttention(kernel_size)
+
+    def forward(self, x):
+        x = self.ca(x) * x
+        x = self.sa(x) * x
+        return x
+
+
 class DecoupledHead(nn.Module):
     """
     Decoupled Detection Head (YOLOX-style).
@@ -163,6 +210,12 @@ class YoloResNet(nn.Module):
         self.pan5_merge = ConvBnAct(fpn_ch * 2, fpn_ch, 1, padding=0)
         self.pan5_conv = ConvBnAct(fpn_ch, fpn_ch, 3)
 
+        # === CBAM Attention Modules ===
+        self.cbam_sppf = CBAM(fpn_ch)
+        self.cbam_n3 = CBAM(fpn_ch)
+        self.cbam_n4 = CBAM(fpn_ch)
+        self.cbam_n5 = CBAM(fpn_ch)
+
         # === 3 Decoupled Detection Heads ===
         self.head_s = DecoupledHead(fpn_ch, num_anchors, num_classes)
         self.head_m = DecoupledHead(fpn_ch, num_anchors, num_classes)
@@ -179,6 +232,7 @@ class YoloResNet(nn.Module):
         # === SPPF ===
         p5 = self.lat5(c5)
         p5 = self.sppf(p5)
+        p5 = self.cbam_sppf(p5) # Lọc nhiễu sâu nhất
 
         # === FPN Top-Down (cascade smooth — smooth TRƯỚC khi upsample) ===
         p5 = self.fpn5(p5)
@@ -193,6 +247,11 @@ class YoloResNet(nn.Module):
         n4 = self.pan4_conv(n4)
         n5 = self.pan5_merge(torch.cat([self.down4to5(n4), p5], dim=1))
         n5 = self.pan5_conv(n5)
+
+        # Lọc nhiễu triệt để tại mỗi scale trước khi đưa vào Detection Head
+        n3 = self.cbam_n3(n3)
+        n4 = self.cbam_n4(n4)
+        n5 = self.cbam_n5(n5)
 
         # === Decoupled Detection Heads ===
         # Mỗi head trả về [B, H, W, A, 5+C] trực tiếp (đã reshape bên trong)

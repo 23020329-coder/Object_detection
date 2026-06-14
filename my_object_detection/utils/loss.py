@@ -10,8 +10,32 @@ Fixes applied:
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.ops as ops
 from utils.anchors import STRIDES, get_anchor_tensors
+
+class CustomFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, pos_weight=None):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.register_buffer('pos_weight', pos_weight)
+
+    def forward(self, inputs, targets):
+        p = torch.sigmoid(inputs)
+        ce_loss = F.binary_cross_entropy_with_logits(
+            inputs, targets, 
+            pos_weight=self.pos_weight.to(inputs.device) if self.pos_weight is not None else None,
+            reduction='none'
+        )
+        # Quality Focal Loss (QFL) chính xác cho Soft Targets (IoU)
+        loss = ce_loss * (torch.abs(targets - p) ** self.gamma)
+        
+        if self.alpha >= 0:
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            loss = alpha_t * loss
+            
+        return loss
 
 
 class YoloLoss(nn.Module):
@@ -22,16 +46,17 @@ class YoloLoss(nn.Module):
         self.strides = STRIDES
         self.anchors = get_anchor_tensors()
 
-        self.bce_obj = nn.BCEWithLogitsLoss(reduction='none')
+        self.bce_obj = CustomFocalLoss(alpha=0.25, gamma=2.0)
 
-        # Hệ số loss (tuned cho 5-class dataset)
-        self.lambda_coord = 7.5   # Tăng từ 5.0 → push box accuracy (CIoU)
-        self.lambda_obj   = 1.0   # Hệ số objectness (balance đã xử lý per-scale)
-        self.lambda_cls   = 0.5   # Giảm từ 1.0 → Focal Loss đã tự cân bằng, 5 class không cần push mạnh
+        # Thêm pos_weight cho cls: chair (index 4) khó nhất
+        cls_pos_weight = torch.ones(C)
+        cls_pos_weight[-1] = 2.5  # chair
+        self.bce_cls = CustomFocalLoss(alpha=0.25, gamma=2.0, pos_weight=cls_pos_weight)
 
-        # Focal Loss
-        self.focal_alpha = 0.25
-        self.focal_gamma = 2.0
+        # Cứu class Chair bằng cách tăng hệ số phạt obj để tránh nhận nhầm background
+        self.lambda_coord = 7.5
+        self.lambda_obj   = 1.0
+        self.lambda_cls   = 0.5
 
     def forward(self, predictions, targets):
         """
@@ -71,20 +96,17 @@ class YoloLoss(nn.Module):
                     ious = self._pairwise_iou(pred_boxes.detach(), tgt_boxes)
                     obj_target[obj_mask] = ious.clamp(0, 1)
 
-                # --- Classification (Sigmoid Focal Loss) ---
+                # --- Classification (Focal Loss) ---
                 cls_pred = pred[..., 5:5 + self.C][obj_mask]
                 cls_tgt  = tgt[..., 5:5 + self.C][obj_mask]
-                cls_loss = ops.sigmoid_focal_loss(
-                    cls_pred, cls_tgt,
-                    alpha=self.focal_alpha, gamma=self.focal_gamma,
-                    reduction='sum'
-                )
+                cls_loss = self.bce_cls(cls_pred, cls_tgt).sum()
                 total_cls_loss = total_cls_loss + cls_loss
 
             # --- Objectness Loss ---
             # YOLOv5-style: tính .mean() trên TOÀN BỘ grid (cả pos và neg)
             # Tránh chia tách pos/neg vì dùng .mean() riêng sẽ gây mất cân bằng gradient cực lớn.
             # Hệ số balance cho 3 scales (P3 nhiều cell nhất -> weight cao nhất)
+            # Focal Loss tự động đè bẹp False Positives
             obj_loss_map = self.bce_obj(pred[..., 4], obj_target)
             balance = [4.0, 1.0, 0.4]
             obj_loss = obj_loss_map.mean() * balance[scale_idx]

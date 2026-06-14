@@ -5,7 +5,6 @@ Bao gồm: AMP, Warmup, EMA, Gradient Clipping, Multi-Scale Training,
 """
 import math
 import os
-import random
 import argparse
 import copy
 import torch
@@ -63,6 +62,9 @@ def parse_args():
     parser.add_argument("--resume", action="store_true", help="Tự động nạp lại checkpoint nếu có")
     parser.add_argument("--warmup_epochs", type=int, default=3, help="Số epoch warmup")
     parser.add_argument("--eval_interval", type=int, default=5, help="Số epoch giữa mỗi lần đánh giá mAP")
+    parser.add_argument("--conf_threshold", type=float, default=0.01, help="Validation confidence threshold")
+    parser.add_argument("--nms_iou_threshold", type=float, default=0.5, help="Validation NMS IoU threshold")
+    parser.add_argument("--map_iou_threshold", type=float, default=0.5, help="Validation mAP IoU threshold")
     return parser.parse_args()
 
 
@@ -92,7 +94,7 @@ def train(args):
     )
 
     # Mosaic ON (70%), MixUp đã bị TẮT
-    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.7)
+    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.7, copy_paste_prob=0.0)
 
     # === Khởi tạo Model, Loss, Optimizer ===
     print(f"Khởi tạo YOLOv5-ResNet50 + Decoupled Heads với ảnh {args.image_size}×{args.image_size}")
@@ -110,17 +112,20 @@ def train(args):
         {'params': head_params, 'lr': args.lr},
     ], weight_decay=1e-4)
 
-    # Warmup + Cosine Annealing
-    warmup_epochs = args.warmup_epochs
+    # OneCycleLR kích xung lực mạnh
     total_epochs = args.epochs
-
-    def lr_lambda(epoch):
-        if epoch < warmup_epochs:
-            return (epoch + 1) / warmup_epochs
-        progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
-        return max(0.01, 0.5 * (1 + math.cos(math.pi * progress)))  # min LR = 1%
-
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    warmup_epochs = args.warmup_epochs
+    steps_per_epoch = math.ceil(len(train_dataset) / args.batch_size)
+    
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=[args.lr / 10.0, args.lr * 3],
+        epochs=total_epochs,
+        steps_per_epoch=steps_per_epoch,
+        pct_start=0.2,
+        div_factor=10.0,
+        final_div_factor=100.0
+    )
 
     # === Checkpoint & EMA ===
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -135,22 +140,27 @@ def train(args):
     best_loss = float('inf')
     best_map = 0.0
 
-    # === Multi-Scale & Close Mosaic Config ===
-    multi_scales = [512, 576, 640, 704]  # Bội số 32, range an toàn cho VRAM
-    close_mosaic_epoch = total_epochs - 15  # Tắt Mosaic từ epoch 36/50
-    print(f"Multi-Scale Training: {multi_scales}")
+    # === Fixed-Scale & Close Mosaic Config ===
+    close_mosaic_epoch = total_epochs - 15 if total_epochs > 15 else total_epochs
+    print(f"Fixed-Scale Training: {args.image_size}")
     print(f"Close Mosaic Strategy: Tắt Mosaic từ epoch {close_mosaic_epoch + 1}")
+
+    # Tạo DataLoader một lần duy nhất ngoài vòng lặp để tránh overhead fork worker
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2
+    )
 
     # === Training Loop ===
     print(f"Bắt đầu huấn luyện {total_epochs} epoch (warmup {warmup_epochs} epoch)...")
     for epoch in range(total_epochs):
         model.train()
 
-        # === Multi-Scale: Random size mỗi epoch ===
-        if epoch >= warmup_epochs:
-            current_size = random.choice(multi_scales)
-        else:
-            current_size = args.image_size  # Warmup luôn dùng size chuẩn
+        current_size = args.image_size
 
         # === Close Mosaic Strategy ===
         if epoch + 1 > close_mosaic_epoch:
@@ -161,20 +171,10 @@ def train(args):
         else:
             train_dataset.mosaic_prob = 0.7
 
-        # Cập nhật image_size cho dataset và loss
+        # Cập nhật image_size cho dataset (DataLoader sẽ tự lấy kích thước mới)
         train_dataset.base.image_size = current_size
         train_dataset.base.transform = get_train_transform(image_size=current_size)
         criterion.image_size = current_size
-
-        # Tạo DataLoader mới để workers thấy thay đổi
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True,
-            prefetch_factor=2
-        )
 
         epoch_loss = 0
         loop = tqdm(train_loader, desc=f"Epoch [{epoch + 1}/{total_epochs}] (size={current_size})", leave=True)
@@ -197,6 +197,9 @@ def train(args):
             scaler.step(optimizer)
             scaler.update()
 
+            # OneCycleLR steps per batch
+            scheduler.step()
+
             # EMA update
             ema.update(model)
 
@@ -204,7 +207,6 @@ def train(args):
             loop.set_postfix(loss=loss.item())
 
         avg_loss = epoch_loss / len(train_loader)
-        scheduler.step()
 
         current_lr = optimizer.param_groups[1]['lr']  # head LR
         print(f"-> Trung bình Loss Epoch {epoch + 1}: {avg_loss:.4f} | LR: {current_lr:.6f} | Size: {current_size}")
@@ -222,11 +224,12 @@ def train(args):
                 gt_json_path=args.val_data,
                 image_dir=args.val_image_dir,
                 image_size=args.image_size,
-                threshold=0.001,
-                iou_threshold=0.6
+                threshold=args.conf_threshold,
+                nms_iou_threshold=args.nms_iou_threshold,
+                map_iou_threshold=args.map_iou_threshold
             )
             epoch_map = val_result["mAP@0.5"]
-            print(f"-> mAP@0.5 Epoch {epoch + 1}: {epoch_map:.4f}")
+            print(f"-> mAP@{args.map_iou_threshold:.2f} Epoch {epoch + 1}: {epoch_map:.4f}")
 
             # Save best mAP
             if epoch_map > best_map:

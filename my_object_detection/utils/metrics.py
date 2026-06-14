@@ -3,7 +3,6 @@ Metrics & Evaluation cho YOLOv3-style Multi-Scale Detector.
 Decode predictions từ 3 scales, áp dụng NMS, tính mAP@0.5.
 """
 import json
-import math
 import os
 from collections import defaultdict
 
@@ -279,7 +278,8 @@ def decode_multi_scale(model_outputs, image_size, C, conf_threshold=0.15):
     return all_boxes
 
 
-def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, iou_threshold=0.4, use_tta=False):
+def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15,
+                           nms_iou_threshold=0.4, use_tta=False):
     """Predict trên 1 ảnh, decode multi-scale, áp dụng NMS."""
     device = next(model.parameters()).device
     model.eval()
@@ -311,7 +311,7 @@ def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, io
     score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32, device = device)
     class_tensor = torch.tensor([b[5] for b in boxes], dtype=torch.int64, device = device)
 
-    keep_idx = ops.batched_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
+    keep_idx = ops.batched_nms(box_tensor, score_tensor, class_tensor, nms_iou_threshold)
     final_boxes = [boxes[i] for i in keep_idx.tolist()]
 
     # Scale boxes về tọa độ ảnh gốc
@@ -329,7 +329,7 @@ def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, io
 
 
 def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
-                                threshold=0.15, iou_threshold=0.4, max_detections_per_image=100,
+                                threshold=0.15, nms_iou_threshold=0.4, max_detections_per_image=100,
                                 use_tta=False):
     with open(gt_json_path, "r", encoding="utf-8") as file:
         ground_truth = json.load(file)
@@ -344,7 +344,7 @@ def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
             image_path,
             image_size=image_size,
             threshold=threshold,
-            iou_threshold=iou_threshold,
+            nms_iou_threshold=nms_iou_threshold,
             use_tta=use_tta,
         )
 
@@ -366,7 +366,7 @@ def build_predictions_for_split(model, gt_json_path, image_dir, image_size=640,
 
 
 def evaluate_model_map(model, gt_json_path, image_dir, image_size=640,
-                       threshold=0.15, iou_threshold=0.5,
+                       threshold=0.15, nms_iou_threshold=0.5, map_iou_threshold=0.5,
                        max_detections_per_image=100, output_path=None,
                        use_tta=False):
     ground_truth, predictions = build_predictions_for_split(
@@ -375,7 +375,7 @@ def evaluate_model_map(model, gt_json_path, image_dir, image_size=640,
         image_dir=image_dir,
         image_size=image_size,
         threshold=threshold,
-        iou_threshold=iou_threshold,
+        nms_iou_threshold=nms_iou_threshold,
         max_detections_per_image=max_detections_per_image,
         use_tta=use_tta,
     )
@@ -384,7 +384,7 @@ def evaluate_model_map(model, gt_json_path, image_dir, image_size=640,
         ground_truth=ground_truth,
         predictions=predictions,
         classes=ground_truth["classes"],
-        iou_threshold=iou_threshold,
+        iou_threshold=map_iou_threshold,
     )
 
     if output_path is not None:
