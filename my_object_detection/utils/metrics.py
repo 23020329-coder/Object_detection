@@ -303,24 +303,16 @@ def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15, io
     # Decode từ 3 scales
     boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
 
-    # === TTA: Horizontal Flip ===
-    if use_tta:
-        img_flip = img_tensor.flip(-1)
-        with torch.no_grad():
-            outputs_flip = model(img_flip)
-        boxes_flip = decode_multi_scale(outputs_flip, image_size, C, conf_threshold=threshold)
-        for x1, y1, x2, y2, score, cls_idx in boxes_flip:
-            boxes.append((image_size - x2, y1, image_size - x1, y2, score, cls_idx))
-
     if len(boxes) == 0:
         return original_img, []
 
-    # NMS
-    box_tensor = torch.tensor([[b[0], b[1], b[2], b[3]] for b in boxes], dtype=torch.float32)
-    score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32)
-    class_tensor = torch.tensor([b[5] for b in boxes], dtype=torch.int64)
+    # NMS siêu tốc trên GPU
+    box_tensor = torch.tensor([[b[0], b[1], b[2], b[3]] for b in boxes], dtype=torch.float32, device = device)
+    score_tensor = torch.tensor([b[4] for b in boxes], dtype=torch.float32, device = device)
+    class_tensor = torch.tensor([b[5] for b in boxes], dtype=torch.int64, device = device)
 
-    final_boxes = batched_weighted_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
+    keep_idx = ops.batched_nms(box_tensor, score_tensor, class_tensor, iou_threshold)
+    final_boxes = [boxes[i] for i in keep_idx.tolist()]
 
     # Scale boxes về tọa độ ảnh gốc
     scaled_boxes = []

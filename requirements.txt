@@ -4,3 +4,4 @@ numpy
 opencv-python
 albumentations
 tqdm
+ensemble-boxes
