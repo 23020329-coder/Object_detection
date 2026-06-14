@@ -110,17 +110,19 @@ def train(args):
         {'params': head_params, 'lr': args.lr},
     ], weight_decay=1e-4)
 
-    # Warmup + Cosine Annealing
-    warmup_epochs = args.warmup_epochs
     total_epochs = args.epochs
-
-    def lr_lambda(epoch):
-        if epoch < warmup_epochs:
-            return (epoch + 1) / warmup_epochs
-        progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
-        return max(0.01, 0.5 * (1 + math.cos(math.pi * progress)))  # min LR = 1%
-
-    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    steps_per_epoch = len(base_train_dataset) // args.batch_size + 1
+    
+    # OneCycleLR tự động warmup cực nhanh và ép hội tụ mạnh
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=[args.lr / 10.0, args.lr],
+        epochs=total_epochs,
+        steps_per_epoch=steps_per_epoch,
+        pct_start=0.1,  # Dành 10% tổng thời gian để Warmup (lên đỉnh LR)
+        div_factor=10.0,
+        final_div_factor=100.0
+    )
 
     # === Checkpoint & EMA ===
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -142,15 +144,17 @@ def train(args):
     print(f"Close Mosaic Strategy: Tắt Mosaic từ epoch {close_mosaic_epoch + 1}")
 
     # === Training Loop ===
-    print(f"Bắt đầu huấn luyện {total_epochs} epoch (warmup {warmup_epochs} epoch)...")
+    print(f"Bắt đầu huấn luyện {total_epochs} epoch (warmup {args.warmup_epochs} epoch)...")
     for epoch in range(total_epochs):
         model.train()
 
         # === Multi-Scale: Random size mỗi epoch ===
-        if epoch >= warmup_epochs:
+        # Thay vì dựa vào warmup_epochs cũ, ta lấy 10% epochs đầu làm mốc cố định size
+        warmup_limit = max(1, int(total_epochs * 0.1))
+        if epoch >= warmup_limit:
             current_size = random.choice(multi_scales)
         else:
-            current_size = args.image_size  # Warmup luôn dùng size chuẩn
+            current_size = args.image_size  # Giai đoạn đầu luôn dùng size chuẩn
 
         # === Close Mosaic Strategy ===
         if epoch + 1 > close_mosaic_epoch:
@@ -199,12 +203,12 @@ def train(args):
 
             # EMA update
             ema.update(model)
+            scheduler.step()  # OneCycleLR step theo từng batch
 
             epoch_loss += loss.item()
             loop.set_postfix(loss=loss.item())
 
         avg_loss = epoch_loss / len(train_loader)
-        scheduler.step()
 
         current_lr = optimizer.param_groups[1]['lr']  # head LR
         print(f"-> Trung bình Loss Epoch {epoch + 1}: {avg_loss:.4f} | LR: {current_lr:.6f} | Size: {current_size}")
