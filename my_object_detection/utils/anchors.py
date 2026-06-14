@@ -13,13 +13,14 @@ import torch
 # Anchors (width, height) tính bằng pixel cho ảnh 640×640
 # Được sinh ra bằng K-Means AutoAnchor trên dataset
 # Nếu anchors này chưa được chạy K-Means, sử dụng anchors COCO-based này
+
 ANCHORS = [
-    # Scale 0: P3 (stride 8, grid 80×80) — Vật thể NHỏ (< 64px)
-    [(10, 13), (16, 30), (33, 23)],
-    # Scale 1: P4 (stride 16, grid 40×40) — Vật thể VỪ (64-192px)
-    [(30, 61), (62, 45), (59, 119)],
-    # Scale 2: P5 (stride 32, grid 20×20) — Vật thể LỚN (> 192px)
-    [(116, 90), (156, 198), (373, 326)],
+    # Scale 0: P3 (stride 8, grid 80×80) — Vật thể NHỎ
+    [(28, 53), (59, 90), (65, 181)],
+    # Scale 1: P4 (stride 16, grid 40×40) — Vật thể VỪA
+    [(147, 148), (110, 297), (271, 263)],
+    # Scale 2: P5 (stride 32, grid 20×20) — Vật thể LỚN
+    [(189, 434), (338, 498), (555, 567)],
 ]
 STRIDES = [8, 16, 32]
 NUM_ANCHORS_PER_SCALE = 3
@@ -27,6 +28,7 @@ NUM_ANCHORS_PER_SCALE = 3
 # Ngưỡng IoU tối thiểu để gán GT vào anchor (Multi-Anchor Assignment)
 MULTI_ANCHOR_IOU_THRESH = 0.25
 IGNORE_ANCHOR_IOU_THRESH = 0.15
+MAX_MATCHING_ANCHORS = 3
 
 
 def get_anchors():
@@ -89,7 +91,7 @@ def find_matching_anchors(gt_w, gt_h, iou_thresh=MULTI_ANCHOR_IOU_THRESH):
 
     matched = [item for item in candidates if item[0] >= iou_thresh]
     if matched:
-        return matched
+        return matched[:MAX_MATCHING_ANCHORS]
 
     # Luon giu lai best anchor de moi GT co it nhat mot positive target.
     return candidates[:1]
