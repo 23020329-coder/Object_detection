@@ -1,30 +1,162 @@
-# My Object Detection
+# Object Detection Submission
 
-Dự án YOLO object detection với backbone ResNet18.
+This folder is the main submission package for the object detection assignment.
 
-## Cấu trúc thư mục
+The project implements a custom anchor-based detector in PyTorch. It does not use
+complete detection frameworks such as YOLOv5/v8, Detectron2, MMDetection, or
+torchvision Faster R-CNN/SSD.
 
-- `utils/`: Chứa các tiện ích xử lý dữ liệu, dataset, hàm loss, và đánh giá mô hình.
-- `models/`: Thư mục để lưu trữ các model checkpoint (`.pth`).
-- `model_arch.py`: Định nghĩa kiến trúc mô hình (YoloResNet).
-- `train.py`: Vòng lặp huấn luyện mô hình.
-- `predict.py`: Hàm dự đoán cho ảnh và sinh file predictions.json.
+## Model Summary
 
-## Cách sử dụng
+- Classes: `person`, `car`, `dog`, `cat`, `chair`
+- Backbone: pretrained ResNet50 feature extractor
+- Neck: SPPF + FPN/PAN multi-scale feature fusion
+- Heads: decoupled box/objectness/classification heads
+- Anchors: dataset-fitted anchors from K-means analysis
+- Loss: CIoU box loss + BCE objectness + BCE classification
+- Inference: confidence filtering, class-wise NMS, optional horizontal flip TTA
 
-1. **Cài đặt thư viện**:
+## Folder Structure
+
+```text
+my_object_detection/
+  model_arch.py
+  train.py
+  predict.py
+  requirements.txt
+  utils/
+    anchors.py
+    dataset.py
+    loss.py
+    metrics.py
+  models/
+    .gitkeep
+```
+
+Large checkpoint files are intentionally not included in the zip. The prediction
+script can download `best.pth` from Hugging Face when it is missing locally.
+
+## Install
+
 ```bash
 pip install -r requirements.txt
 ```
 
-2. **Huấn luyện**:
-Cập nhật các đường dẫn file JSON và thư mục ảnh trong `train.py`, sau đó chạy:
-```bash
-python train.py
+## Checkpoint From Hugging Face
+
+The trained checkpoint is hosted on Hugging Face:
+
+```text
+https://huggingface.co/Quanganh6905/my-object-detection-model
 ```
 
-3. **Dự đoán**:
-Cập nhật thông tin về class và weights trong `predict.py`, sau đó sử dụng hàm `generate_predictions_json` hoặc `predict_image`.
+The file used by inference is:
+
+```text
+best.pth
+```
+
+`predict.py` uses this repository by default. If `./models/best.pth` already
+exists, the local checkpoint is used. If the file is missing, it is downloaded
+automatically.
+
+To override the default repository, set:
+
 ```bash
-python predict.py
+export HF_MODEL_REPO=Quanganh6905/my-object-detection-model
+export HF_MODEL_FILE=best.pth
+```
+
+For a private Hugging Face repository, also set:
+
+```bash
+export HF_TOKEN=your_huggingface_token
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:HF_MODEL_REPO="Quanganh6905/my-object-detection-model"
+$env:HF_MODEL_FILE="best.pth"
+$env:HF_TOKEN="your_huggingface_token"
+```
+
+## Train
+
+```bash
+python train.py \
+  --train_data ../public/annotations/train.json \
+  --val_data ../public/annotations/val.json \
+  --image_dir ../public/train/images \
+  --val_image_dir ../public/val/images \
+  --checkpoint_dir ./models \
+  --epochs 50 \
+  --batch_size 16 \
+  --image_size 640 \
+  --mosaic_prob 0.5 \
+  --close_mosaic_epochs 15 \
+  --chair_oversample 1.5
+```
+
+The best validation checkpoint is saved to:
+
+```text
+./models/best.pth
+```
+
+If mixed precision is unstable on the current GPU, add:
+
+```bash
+--no_amp
+```
+
+## Predict
+
+Recommended validation/test inference command:
+
+```bash
+python predict.py \
+  --image_dir ../public/test/images \
+  --output predictions.json \
+  --checkpoint ./models/best.pth \
+  --image_size 640 \
+  --conf_thresh 0.01 \
+  --iou_thresh 0.55 \
+  --max_candidates 500 \
+  --max_detections 100 \
+  --tta
+```
+
+The output file is `predictions.json`.
+
+## Prediction Format
+
+```json
+[
+  {
+    "image_id": "img_example.jpg",
+    "boxes": [
+      {
+        "class": "person",
+        "confidence": 0.91,
+        "bbox": [48, 72, 210, 356]
+      }
+    ]
+  }
+]
+```
+
+Images without detections are written as:
+
+```json
+{"image_id": "img_empty.jpg", "boxes": []}
+```
+
+## Local Validation
+
+```bash
+python ../public/tools/evaluate_predictions.py \
+  --ground_truth ../public/annotations/val.json \
+  --predictions predictions.json \
+  --output val_score.json
 ```

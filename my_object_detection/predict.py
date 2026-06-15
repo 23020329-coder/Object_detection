@@ -1,6 +1,9 @@
 import argparse
 import json
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import cv2
 import numpy as np
@@ -13,6 +16,7 @@ from utils.metrics import decode_multi_scale
 
 
 DEFAULT_CLASSES = ["person", "car", "dog", "cat", "chair"]
+DEFAULT_HF_REPO_ID = "Quanganh6905/my-object-detection-model"
 
 
 def parse_args():
@@ -20,6 +24,11 @@ def parse_args():
     parser.add_argument("--image_dir", type=str, required=True, help="Directory containing images")
     parser.add_argument("--output", type=str, required=True, help="Output predictions.json path")
     parser.add_argument("--checkpoint", type=str, default="./models/best.pth", help="Model checkpoint path")
+    parser.add_argument("--hf_repo_id", type=str, default=os.environ.get("HF_MODEL_REPO", DEFAULT_HF_REPO_ID), help="Optional Hugging Face repo id, e.g. username/object-detector")
+    parser.add_argument("--hf_filename", type=str, default=os.environ.get("HF_MODEL_FILE", "best.pth"), help="Checkpoint filename inside the Hugging Face repo")
+    parser.add_argument("--hf_revision", type=str, default=os.environ.get("HF_MODEL_REVISION", "main"), help="Hugging Face revision/branch/tag")
+    parser.add_argument("--hf_token", type=str, default=os.environ.get("HF_TOKEN", ""), help="Optional token for private Hugging Face repos")
+    parser.add_argument("--no_auto_download", action="store_true", help="Do not download checkpoint automatically if it is missing")
     parser.add_argument("--conf_thresh", type=float, default=0.01, help="Confidence threshold")
     parser.add_argument("--iou_thresh", type=float, default=0.6, help="NMS/WBF IoU threshold")
     parser.add_argument("--image_size", type=int, default=640, help="Inference image size")
@@ -31,6 +40,46 @@ def parse_args():
     parser.add_argument("--class_nms", type=str, default="", help="Class-specific NMS IoU, e.g. chair:0.45")
     parser.add_argument("--classes_json", type=str, default=None, help="Optional JSON file containing classes")
     return parser.parse_args()
+
+
+def download_checkpoint_from_hf(repo_id, filename, revision, destination, token=""):
+    if not repo_id:
+        raise FileNotFoundError(
+            f"Checkpoint not found: {destination}. Provide --checkpoint or set --hf_repo_id."
+        )
+
+    safe_filename = urllib.parse.quote(filename, safe="/")
+    url = f"https://huggingface.co/{repo_id}/resolve/{revision}/{safe_filename}"
+    os.makedirs(os.path.dirname(os.path.abspath(destination)) or ".", exist_ok=True)
+    temp_path = destination + ".download"
+
+    request = urllib.request.Request(url)
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+
+    print(f"Checkpoint missing. Downloading from Hugging Face: {repo_id}/{filename}")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            total = int(response.headers.get("Content-Length", 0))
+            with open(temp_path, "wb") as file:
+                with tqdm(total=total or None, unit="B", unit_scale=True, desc="Download checkpoint") as pbar:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        file.write(chunk)
+                        pbar.update(len(chunk))
+        os.replace(temp_path, destination)
+    except urllib.error.HTTPError as exc:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise RuntimeError(f"Could not download checkpoint from {url}: HTTP {exc.code}") from exc
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+    return destination
 
 
 def topk_boxes(boxes, max_candidates):
@@ -267,7 +316,15 @@ if __name__ == "__main__":
 
     model = YoloResNet(num_classes=len(classes)).to(device)
     if not os.path.exists(args.checkpoint):
-        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+        if args.no_auto_download:
+            raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+        download_checkpoint_from_hf(
+            repo_id=args.hf_repo_id,
+            filename=args.hf_filename,
+            revision=args.hf_revision,
+            destination=args.checkpoint,
+            token=args.hf_token,
+        )
 
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
