@@ -1,6 +1,6 @@
 torch
 torchvision
-opencv-python
+opencv-python-headless
 albumentations
 matplotlib
 tqdm

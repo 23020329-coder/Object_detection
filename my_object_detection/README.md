@@ -84,18 +84,22 @@ $env:HF_TOKEN="your_huggingface_token"
 ## Train
 
 ```bash
-python train.py \
-  --train_data ../public/annotations/train.json \
-  --val_data ../public/annotations/val.json \
-  --image_dir ../public/train/images \
-  --val_image_dir ../public/val/images \
-  --checkpoint_dir ./models \
+python my_object_detection/train.py \
+  --train_data public/annotations/train.json \
+  --val_data public/annotations/val.json \
+  --image_dir public/train/images \
+  --val_image_dir public/val/images \
+  --checkpoint_dir my_object_detection/models \
   --epochs 50 \
   --batch_size 16 \
+  --lr 1e-4 \
   --image_size 640 \
+  --eval_interval 5 \
   --mosaic_prob 0.5 \
   --close_mosaic_epochs 15 \
-  --chair_oversample 1.5
+  --chair_oversample 1.5 \
+  --conf_threshold 0.01 \
+  --nms_iou_threshold 0.5
 ```
 
 The best validation checkpoint is saved to:
@@ -115,15 +119,17 @@ If mixed precision is unstable on the current GPU, add:
 Recommended validation/test inference command:
 
 ```bash
-python predict.py \
-  --image_dir ../public/test/images \
+python my_object_detection/predict.py \
+  --image_dir public/val/images \
+  --checkpoint my_object_detection/models/best.pth \
   --output predictions.json \
-  --checkpoint ./models/best.pth \
   --image_size 640 \
-  --conf_thresh 0.01 \
-  --iou_thresh 0.55 \
-  --max_candidates 500 \
+  --conf_thresh 0.005 \
+  --iou_thresh 0.45 \
+  --max_candidates 300 \
   --max_detections 100 \
+  --class_conf "chair:0.015" \
+  --class_nms "chair:0.45" \
   --tta
 ```
 
