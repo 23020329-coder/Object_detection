@@ -191,7 +191,7 @@ class MosaicDataset(Dataset):
     - Epoch 36-50: Mosaic OFF (0%) → fine-tune trên ảnh clean
     """
 
-    def __init__(self, base_dataset, mosaic_prob=0.7, copy_paste_prob=0.0):
+    def __init__(self, base_dataset, mosaic_prob=0.5, copy_paste_prob=0.0):
         self.base = base_dataset
         self.mosaic_prob = mosaic_prob
         self.copy_paste_prob = copy_paste_prob
@@ -330,10 +330,10 @@ class MosaicDataset(Dataset):
             A.HorizontalFlip(p=0.5),
             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.3),
             A.CoarseDropout(
-                num_holes_range=(1, 8),
-                hole_height_range=(8, 32),
-                hole_width_range=(8, 32),
-                p=0.3
+                num_holes_range=(1, 4),
+                hole_height_range=(8, 24),
+                hole_width_range=(8, 24),
+                p=0.15
             ),
             A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ToTensorV2(),
@@ -358,12 +358,12 @@ def get_train_transform(image_size=640):
     return A.Compose([
         A.Resize(height=image_size, width=image_size),
         A.HorizontalFlip(p=0.5),
-        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+        A.ColorJitter(brightness=0.18, contrast=0.18, saturation=0.18, hue=0.08, p=0.35),
         A.Affine(
-            translate_percent=(-0.0625, 0.0625),
-            scale=(0.9, 1.1),
-            rotate=(-15, 15),
-            p=0.5,
+            translate_percent=(-0.05, 0.05),
+            scale=(0.92, 1.08),
+            rotate=(-8, 8),
+            p=0.45,
             border_mode=cv2.BORDER_CONSTANT,
         ),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),

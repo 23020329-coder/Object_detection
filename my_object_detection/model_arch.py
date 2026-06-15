@@ -27,6 +27,18 @@ class ConvBnAct(nn.Module):
         return self.act(self.bn(self.conv(x)))
 
 
+class ResidualConv(nn.Module):
+    def __init__(self, ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            ConvBnAct(ch, ch, 3),
+            ConvBnAct(ch, ch, 3),
+        )
+
+    def forward(self, x):
+        return x + self.block(x)
+
+
 class SPPF(nn.Module):
     """
     Spatial Pyramid Pooling Fast (YOLOv5).
@@ -194,12 +206,19 @@ class YoloResNet(nn.Module):
         self.sppf = SPPF(fpn_ch)
 
         # === FPN Top-Down ===
+        self.lat2 = nn.Conv2d(256, fpn_ch, 1)
         self.lat4 = nn.Conv2d(1024, fpn_ch, 1)
         self.lat3 = nn.Conv2d(512, fpn_ch, 1)
+        self.c2_to_p3 = ConvBnAct(fpn_ch, fpn_ch, 3, stride=2)
 
         self.fpn5 = ConvBnAct(fpn_ch, fpn_ch, 3)  # smooth P5
+        self.fpn4_merge = ConvBnAct(fpn_ch * 2, fpn_ch, 1, padding=0)
         self.fpn4 = ConvBnAct(fpn_ch, fpn_ch, 3)  # smooth P4
+        self.fpn3_merge = ConvBnAct(fpn_ch * 3, fpn_ch, 1, padding=0)
         self.fpn3 = ConvBnAct(fpn_ch, fpn_ch, 3)  # smooth P3
+        self.fpn3_refine = ResidualConv(fpn_ch)
+        self.fpn4_refine = ResidualConv(fpn_ch)
+        self.fpn5_refine = ResidualConv(fpn_ch)
 
         # === PANet Bottom-Up ===
         self.down3to4 = ConvBnAct(fpn_ch, fpn_ch, 3, stride=2)
@@ -236,10 +255,21 @@ class YoloResNet(nn.Module):
 
         # === FPN Top-Down (cascade smooth — smooth TRƯỚC khi upsample) ===
         p5 = self.fpn5(p5)
-        p4 = self.lat4(c4) + F.interpolate(p5, size=c4.shape[2:], mode='nearest')
+        p4 = self.fpn4_merge(torch.cat([
+            self.lat4(c4),
+            F.interpolate(p5, size=c4.shape[2:], mode='nearest')
+        ], dim=1))
         p4 = self.fpn4(p4)
-        p3 = self.lat3(c3) + F.interpolate(p4, size=c3.shape[2:], mode='nearest')
+        c2_p3 = self.c2_to_p3(self.lat2(c2))
+        p3 = self.fpn3_merge(torch.cat([
+            self.lat3(c3),
+            F.interpolate(p4, size=c3.shape[2:], mode='nearest'),
+            c2_p3
+        ], dim=1))
         p3 = self.fpn3(p3)
+        p3 = self.fpn3_refine(p3)
+        p4 = self.fpn4_refine(p4)
+        p5 = self.fpn5_refine(p5)
 
         # === PANet Bottom-Up ===
         n3 = p3

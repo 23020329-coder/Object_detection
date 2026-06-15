@@ -87,14 +87,15 @@ class YoloLoss(nn.Module):
                 pred_boxes = self._decode_pred(pred, anchors, stride, obj_mask)
                 tgt_boxes  = self._decode_tgt(tgt, stride, obj_mask)
 
-                box_loss = ops.complete_box_iou_loss(pred_boxes, tgt_boxes, reduction='sum')
+                pred_boxes = pred_boxes.clamp(0.0, 1.0)
+                tgt_boxes = tgt_boxes.clamp(0.0, 1.0)
+                box_loss = ops.complete_box_iou_loss(pred_boxes, tgt_boxes, reduction='none')
+                box_loss = torch.nan_to_num(box_loss, nan=1.0, posinf=1.0, neginf=1.0).sum()
                 total_box_loss = total_box_loss + box_loss
 
                 # --- IoU-aware Objectness target ---
                 # .detach() cắt gradient: IoU dùng như hằng số mục tiêu
-                with torch.no_grad():
-                    ious = self._pairwise_iou(pred_boxes.detach(), tgt_boxes)
-                    obj_target[obj_mask] = ious.clamp(0, 1)
+                obj_target[obj_mask] = 1.0
 
                 # --- Classification (Focal Loss) ---
                 cls_pred = pred[..., 5:5 + self.C][obj_mask]
@@ -108,6 +109,7 @@ class YoloLoss(nn.Module):
             # Hệ số balance cho 3 scales (P3 nhiều cell nhất -> weight cao nhất)
             # Focal Loss tự động đè bẹp False Positives
             obj_loss_map = self.bce_obj(pred[..., 4], obj_target)
+            obj_loss_map = torch.nan_to_num(obj_loss_map, nan=0.0, posinf=0.0, neginf=0.0)
             balance = [4.0, 1.0, 0.4]
             if valid_obj_mask.any():
                 obj_loss = obj_loss_map[valid_obj_mask].mean() * balance[scale_idx]

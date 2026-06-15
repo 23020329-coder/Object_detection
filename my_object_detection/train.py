@@ -66,6 +66,10 @@ def parse_args():
     parser.add_argument("--nms_iou_threshold", type=float, default=0.5, help="Validation NMS IoU threshold")
     parser.add_argument("--map_iou_threshold", type=float, default=0.5, help="Validation mAP IoU threshold")
     parser.add_argument("--chair_oversample", type=float, default=1.5, help="Sampling weight for images containing chair")
+    parser.add_argument("--mosaic_prob", type=float, default=0.5, help="Mosaic probability before close-mosaic fine-tuning")
+    parser.add_argument("--close_mosaic_epochs", type=int, default=15, help="Number of final epochs trained without mosaic")
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader worker count")
+    parser.add_argument("--no_amp", action="store_true", help="Disable mixed precision training")
     return parser.parse_args()
 
 
@@ -104,8 +108,8 @@ def train(args):
         image_size=args.image_size
     )
 
-    # Mosaic ON (70%), MixUp đã bị TẮT
-    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=0.7, copy_paste_prob=0.0)
+    # Moderate mosaic works better here: many empty images, mostly large objects.
+    train_dataset = MosaicDataset(base_train_dataset, mosaic_prob=args.mosaic_prob, copy_paste_prob=0.0)
 
     # === Khởi tạo Model, Loss, Optimizer ===
     print(f"Khởi tạo YOLOv5-ResNet50 + Decoupled Heads với ảnh {args.image_size}×{args.image_size}")
@@ -162,14 +166,16 @@ def train(args):
         print(f"[*] Đã khôi phục trọng số từ {best_model_path}")
 
     ema = EMA(model, decay=0.9999)
-    scaler = torch.amp.GradScaler('cuda')
+    use_amp = torch.cuda.is_available() and not args.no_amp
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     best_loss = float('inf')
     best_map = 0.0
 
     # === Fixed-Scale & Close Mosaic Config ===
-    close_mosaic_epoch = total_epochs - 15 if total_epochs > 15 else total_epochs
+    close_mosaic_epoch = max(total_epochs - args.close_mosaic_epochs, 0) if total_epochs > args.close_mosaic_epochs else total_epochs
     print(f"Fixed-Scale Training: {args.image_size}")
     print(f"Close Mosaic Strategy: Tắt Mosaic từ epoch {close_mosaic_epoch + 1}")
+    print(f"AMP: {'on' if use_amp else 'off'} | Mosaic prob: {args.mosaic_prob:.2f}")
 
     # Tạo DataLoader một lần duy nhất ngoài vòng lặp để tránh overhead fork worker
     train_loader = DataLoader(
@@ -177,9 +183,10 @@ def train(args):
         batch_size=args.batch_size,
         shuffle=train_sampler is None,
         sampler=train_sampler,
-        num_workers=4,
+        num_workers=args.num_workers,
         pin_memory=True,
-        prefetch_factor=2
+        prefetch_factor=2 if args.num_workers > 0 else None,
+        persistent_workers=args.num_workers > 0
     )
 
     # === Training Loop ===
@@ -196,14 +203,15 @@ def train(args):
             if epoch + 1 == close_mosaic_epoch + 1:
                 print(f"\n[!] Close Mosaic: Tắt Mosaic từ epoch {epoch + 1} — fine-tune trên ảnh clean\n")
         else:
-            train_dataset.mosaic_prob = 0.7
+            train_dataset.mosaic_prob = args.mosaic_prob
 
         # Cập nhật image_size cho dataset (DataLoader sẽ tự lấy kích thước mới)
         train_dataset.base.image_size = current_size
         train_dataset.base.transform = get_train_transform(image_size=current_size)
         criterion.image_size = current_size
 
-        epoch_loss = 0
+        epoch_loss = 0.0
+        valid_batches = 0
         loop = tqdm(train_loader, desc=f"Epoch [{epoch + 1}/{total_epochs}] (size={current_size})", leave=True)
         for images, tgt_s, tgt_m, tgt_l in loop:
             images = images.to(device)
@@ -212,11 +220,16 @@ def train(args):
             tgt_l = tgt_l.to(device)
 
             optimizer.zero_grad()
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 out_s, out_m, out_l = model(images)
                 predictions = (out_s.float(), out_m.float(), out_l.float())
                 targets = (tgt_s.float(), tgt_m.float(), tgt_l.float())
                 loss = criterion(predictions, targets)
+
+            if not torch.isfinite(loss):
+                print(f"[WARN] Non-finite loss at epoch {epoch + 1}; skipping batch.")
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -231,9 +244,13 @@ def train(args):
             ema.update(model)
 
             epoch_loss += loss.item()
+            valid_batches += 1
             loop.set_postfix(loss=loss.item())
 
-        avg_loss = epoch_loss / len(train_loader)
+        avg_loss = epoch_loss / max(valid_batches, 1)
+        if valid_batches == 0:
+            print(f"[WARN] Epoch {epoch + 1} has no valid batches; skip evaluation and checkpointing.")
+            continue
 
         current_lr = optimizer.param_groups[1]['lr']  # head LR
         print(f"-> Trung bình Loss Epoch {epoch + 1}: {avg_loss:.4f} | LR: {current_lr:.6f} | Size: {current_size}")
