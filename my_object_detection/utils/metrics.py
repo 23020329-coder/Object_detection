@@ -303,6 +303,15 @@ def predict_image_for_eval(model, image_path, image_size=640, threshold=0.15,
     # Decode từ 3 scales
     boxes = decode_multi_scale(outputs, image_size, C, conf_threshold=threshold)
 
+    if use_tta:
+        with torch.no_grad():
+            outputs_flip = model(img_tensor.flip(-1))
+        flip_boxes = decode_multi_scale(outputs_flip, image_size, C, conf_threshold=threshold)
+        boxes.extend([
+            (image_size - x2, y1, image_size - x1, y2, score, cls_idx)
+            for x1, y1, x2, y2, score, cls_idx in flip_boxes
+        ])
+
     if len(boxes) == 0:
         return original_img, []
 

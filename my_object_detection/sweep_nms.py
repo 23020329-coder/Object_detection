@@ -24,6 +24,7 @@ def sweep(args):
     print(f"Device: {device}")
     print(f"Validation: {args.val_data}")
     print(f"Jobs: {len(jobs)} ({len(conf_values)} conf x {len(nms_values)} NMS IoU)")
+    print(f"TTA: {'on' if args.tta else 'off'}")
     print("Tip: each job runs the full validation set once.")
 
     best = None
@@ -36,6 +37,7 @@ def sweep(args):
             threshold=conf_thr,
             nms_iou_threshold=nms_thr,
             map_iou_threshold=args.map_iou_threshold,
+            use_tta=args.tta,
         )
 
         map50 = result["mAP@0.5"]
@@ -72,5 +74,6 @@ if __name__ == "__main__":
     parser.add_argument("--map_iou_threshold", type=float, default=0.5)
     parser.add_argument("--conf_values", type=str, default="0.01,0.03,0.05")
     parser.add_argument("--nms_values", type=str, default="0.45,0.50,0.55")
+    parser.add_argument("--tta", action="store_true", help="Evaluate with horizontal flip TTA")
     args = parser.parse_args()
     sweep(args)
